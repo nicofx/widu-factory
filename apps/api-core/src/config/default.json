@@ -1,28 +1,19 @@
 {
-  "pipelines": {
-    "default": {
-      "pre": ["LoggingStep"],
-      "processing": [],
-      "post": ["ResponseFormatterStep"]
-    },
-    "PipelineGenéricoDemo": {
-      "pre": [
-        "HeaderCheckStep",
-        "RateLimiterStep",
-        "TokenParserStep"
-      ],
-      "processing": [
-        "ValidationStep",
-        "NormalizerStep",
-        "ContextBuilderStep",
-        "BusinessAuditStep"
-      ],
-      "post": [
-        "MetadataTaggerStep",
-        "NotifierStep",
-        "TracerStep",
-        "ResponseFormatterStep"
-      ]
-    }
+  "schemaVersion": "1.0",
+  "phases": ["pre", "processing", "post"],
+
+  "pre": {
+    "steps": [
+      "HeaderCheckStep",
+      { "name": "TokenParserStep", "if": "context.headers['x-admin']==='true'" },
+      { "name": "RateLimiterStep", "parallel": true }
+    ]
+  },
+  "processing": {
+    "steps": ["ValidationStep", "NormalizerStep"]
+  },
+  "post": {
+    "hooksBefore": [{ "name": "TracerStep", "parallel": true }],
+    "steps": ["ResponseFormatterStep"]
   }
 }

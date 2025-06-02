@@ -1,16 +1,20 @@
-// src/pipeline/factory/pipeline-factory.module.ts
-import { Module } from '@nestjs/common';
-import { ConfigurablePipelineFactory } from './configurable-pipeline.factory';
-import { RuntimePipelineModule } from '../runtime-pipeline.module';
+import { Module, forwardRef } from '@nestjs/common';
+
+/* ─── Motor + subsistemas ─── */
+import { PipelineCoreModule } from '../core/pipeline-core.module';
+
+/* ─── Nueva fábrica basada en JSON ─── */
+import { FrameworkPipelineFactory } from '../core/factory/framework-pipeline.factory';
 
 @Module({
   imports: [
-    RuntimePipelineModule,
+    /* Asegura que los subsistemas que la factory inyecta estén disponibles */
+    forwardRef(() => PipelineCoreModule),
   ],
   providers: [
     {
       provide: 'PIPELINE_FACTORY',
-      useClass: ConfigurablePipelineFactory,
+      useClass: FrameworkPipelineFactory,   // 👈 aquí el cambio clave
     },
   ],
   exports: ['PIPELINE_FACTORY'],

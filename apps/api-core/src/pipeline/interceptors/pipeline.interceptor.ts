@@ -9,9 +9,9 @@ import {
 import { Reflector } from '@nestjs/core';
 import { Observable, from, switchMap } from 'rxjs';
 import { USE_PIPELINE_KEY, SKIP_PIPELINE_KEY } from '../decorators/pipeline.decorator';
-import { PipelineFactory } from '../factory/pipeline-factory.interface';
-import { PipelineEngineService } from '../pipeline-engine.service';
+import { PipelineEngineService } from '../core/pipeline-engine.service';
 import { RequestContext } from '../interfaces/context.interface';
+import { PipelineFactory } from '../interfaces/pipeline-factory.interface';
 
 @Injectable()
 export class PipelineInterceptor implements NestInterceptor {
@@ -49,7 +49,7 @@ export class PipelineInterceptor implements NestInterceptor {
     const pipeline$ = from(
       this.pipelineFactory
         .getPipeline(pipelineName, requestContext)   // <-- le pasamos el context
-        .then((steps) => this.engine.executeWithSteps(requestContext, steps))
+        .then((steps: any) => this.engine.executeWithSteps(requestContext, steps))
         .then(() => {
           request.pipelineContext = requestContext;  // asignamos antes de seguir
         })

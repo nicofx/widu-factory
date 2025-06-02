@@ -1,4 +1,6 @@
 // src/pipeline/interfaces/pipeline-step.interface.ts
+export type PhaseName = string;          // ← añadido
+
 export interface StepConfig {
   async?: boolean;
   parallelizable?: boolean;
@@ -14,7 +16,7 @@ export enum PipelinePhase {
 }
 
 export interface PipelineStep {
-  execute(requestId: string): Promise<void>;
+  execute(): Promise<void>;
   config?: StepConfig;
 }
 

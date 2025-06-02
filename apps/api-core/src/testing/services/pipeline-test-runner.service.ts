@@ -1,10 +1,9 @@
 // src/testing/services/pipeline-test-runner.service.ts
 import { Injectable, Inject } from '@nestjs/common';
-import { RequestPipelineProvider } from '../../pipeline/request-pipeline.provider';
-import { ContextSubsystem } from '../../pipeline/subsystems/context/context.subsystem';
-import { ServiceResolverSubsystem } from '../../pipeline/subsystems/service/service-resolver.subsystem';
 import { StepExecutionLog, RequestContext } from '../../pipeline/interfaces/context.interface';
-import { PipelineEngineService } from '../../pipeline/pipeline-engine.service';
+import { PipelineEngineService } from '../../pipeline/core/pipeline-engine.service';
+import { ServiceResolverSubsystem } from '../../pipeline/core/subsystems/service/service-resolver.subsystem';
+import { ContextSubsystem } from '../../pipeline/core/subsystems/context/context.subsystem';
 
 @Injectable()
 export class PipelineTestRunnerService {

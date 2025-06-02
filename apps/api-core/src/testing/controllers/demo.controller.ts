@@ -5,7 +5,7 @@ import { Request, Response } from 'express';
 
 @Controller('testing')
 export class DemoController {
-  @UsePipeline('PipelineGenéricoDemo')
+  @UsePipeline('default')
   @Post('demo-generico')
   async runDemo(
     @Req() request: Request, 
