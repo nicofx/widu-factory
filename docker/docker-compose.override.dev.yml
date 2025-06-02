@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  frontend-web:
+    build:
+      context: .
+      dockerfile: apps/frontend-web/Dockerfile.dev
+    container_name: widu-web-dev
+    ports:
+      - "4200:4200"
+    volumes:
+      - ./apps/frontend-web:/app/apps/frontend-web
+    environment:
+      - NODE_ENV=development
+
+  api-core:
+    container_name: widu-api-dev
+    build:
+      context: .
+      dockerfile: apps/api-core/Dockerfile.dev
+    working_dir: /app/apps/api-core
+    command: pnpm start:dev
+    volumes:
+      - .:/app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - CONFIG_PATH=/app/config

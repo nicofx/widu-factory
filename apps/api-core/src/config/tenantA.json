@@ -1,0 +1,28 @@
+{
+  "pipelines": {
+    "default": {
+      "pre":    ["HeaderCheckStep", "LoggingStep"],
+      "processing": ["ValidationStep"],
+      "post":   ["ResponseFormatterStep"]
+    },
+    "demo": {
+      "pre": [
+        "HeaderCheckStep",
+        "TokenParserStep"
+      ],
+      "processing": [
+        "NormalizerStep",
+        "BusinessAuditStep"
+      ],
+      "post": [
+        "NotifierStep",
+        "ResponseFormatterStep"
+      ]
+    },
+    "auditOnly": {
+      "pre": ["LoggingStep"],
+      "processing": ["BusinessAuditStep"],
+      "post": ["ResponseFormatterStep"]
+    }
+  }
+}

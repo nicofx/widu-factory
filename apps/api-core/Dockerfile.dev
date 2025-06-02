@@ -1,0 +1,32 @@
+FROM node:20
+
+WORKDIR /app
+COPY . .
+
+RUN npm install -g pnpm @nestjs/cli
+RUN pnpm install
+
+WORKDIR /app/apps/api-core
+
+# No se necesita copiar templates porque en dev se leen desde src/
+# pero si querés mantener coherencia, podés hacerlo también
+RUN pnpm build && pnpm postbuild
+
+EXPOSE 3000
+
+CMD ["pnpm", "start:dev"]
+
+
+# FROM node:20
+
+# WORKDIR /app
+# COPY . .
+
+# RUN npm install -g pnpm @nestjs/cli
+# RUN pnpm install
+
+# WORKDIR /app/apps/api-core
+
+# EXPOSE 3000
+
+# CMD ["pnpm", "start:dev"]

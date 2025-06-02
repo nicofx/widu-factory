@@ -1,0 +1,28 @@
+{
+  "pipelines": {
+    "default": {
+      "pre": ["LoggingStep"],
+      "processing": [],
+      "post": ["ResponseFormatterStep"]
+    },
+    "PipelineGenéricoDemo": {
+      "pre": [
+        "HeaderCheckStep",
+        "RateLimiterStep",
+        "TokenParserStep"
+      ],
+      "processing": [
+        "ValidationStep",
+        "NormalizerStep",
+        "ContextBuilderStep",
+        "BusinessAuditStep"
+      ],
+      "post": [
+        "MetadataTaggerStep",
+        "NotifierStep",
+        "TracerStep",
+        "ResponseFormatterStep"
+      ]
+    }
+  }
+}

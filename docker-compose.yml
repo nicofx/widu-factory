@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  mongo:
+    image: mongo:6
+    container_name: widu-mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    volumes:
+      - /var/widu/mongo-data:/data/db
+
+  api-core:
+    build:
+      context: .
+      dockerfile: apps/api-core/Dockerfile
+    ports:
+      - "3000:3000"
+    depends_on:
+      - mongo
+    environment:
+      - CONFIG_PATH=apps/api-core/config
+    volumes:
+      - ./config/.env.dev:/app/.env
+
+  frontend-web:
+    build:
+      context: .
+      dockerfile: apps/frontend-web/Dockerfile
+    container_name: widu-web
+    restart: always
+    depends_on:
+      - api-core
+
+volumes:
+  mongo_data:
