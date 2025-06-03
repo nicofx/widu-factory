@@ -19,25 +19,16 @@ async function bootstrap() {
 
   // Swagger / OpenAPI
   const config = new DocumentBuilder()
-    .setTitle('WiduFactory API')
-    .setDescription('Documentación de endpoints')
+    .setTitle('Widu Factory API')
+    .setDescription('API Core de Widu Factory (Multi-tenant, HACL, Auth)')
     .setVersion('1.0')
-    .addApiKey(
-      {
-        type: 'apiKey',
-        name: 'x-tenant',
-        in: 'header',
-      },
-      'x-tenant',
-    )
     .addBearerAuth(
-      {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        in: 'header',
-      },
-      'access-token',
+      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      'Authorization',
+    )
+    .addApiKey(
+      { type: 'apiKey', name: 'x-tenant-id', in: 'header', description: 'Tenant ID header' },
+      'TenantId',
     )
     .build();
 

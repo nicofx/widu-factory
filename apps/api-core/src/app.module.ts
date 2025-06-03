@@ -3,10 +3,8 @@ import { Module } from '@nestjs/common';
 import { APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
-import { PassportModule } from '@nestjs/passport';
 
 /* ─── Módulos de negocio ─── */
-import { UsersModule } from './modules/users/users.module';
 
 /* ─── Middleware global ─── */
 import { TenantMiddleware } from './common/middlewares/tenant.middleware';
@@ -19,6 +17,12 @@ import { PipelineInterceptor } from './pipeline/interceptors/pipeline.intercepto
 
 /* ─── Módulo de pruebas / demos ─── */
 import { TestingModule } from './testing/testing.module';
+import { UsersModule } from './modules/users/users.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { PermissionsModule } from './modules/permissions/permissions.module';
+import { PlansModule } from './modules/plans/plans.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { HealthModule } from './modules/health/health.module';
 
 @Module({
   imports: [
@@ -27,21 +31,26 @@ import { TestingModule } from './testing/testing.module';
       envFilePath: '/app/.env',
       isGlobal: true,
     }),
-
+    
     /* MongoDB */
     MongooseModule.forRootAsync({
       useFactory: () => ({ uri: process.env.MONGO_URI }),
     }),
-
-    /* Módulos de negocio */
-    PassportModule,
+    
+    /* Módulos Base */
     UsersModule,
-
+    RolesModule,
+    PermissionsModule,
+    PlansModule,
+    AuthModule,
+    HealthModule,
+    /* Módulos de negocio */
+    
     /* ─── Pipeline reorganizado ─── */
     PipelineCoreModule,        // motor + subsistemas
     PipelineExtensionsModule,  // pasos & hooks + STEP_REGISTRY
     PipelineFactoryModule,     // token 'PIPELINE_FACTORY'
-
+    
     /* Módulo de pruebas */
     TestingModule,
   ],

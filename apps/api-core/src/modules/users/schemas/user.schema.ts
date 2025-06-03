@@ -1,30 +1,38 @@
+// apps/api-core/src/modules/users/schemas/user.schema.ts
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 
-@Schema()
-export class User {
-  @Prop({ required: true, unique: true })
+@Schema({ timestamps: true })
+export class User extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
   email!: string;
-  
+
   @Prop({ required: true })
-  password!: string;
-  
-  @Prop({ required: true })
-  role!: string;
-  
-  @Prop({ required: true })
-  tenant!: string;
-  
-  @Prop({ default: 'default' }) // 👈 ya preparado para que sea opcional
-  plan?: string;
-  
-  @Prop({ default: 'jwt' }) // 👈 agregamos esta línea
-  strategy?: string;
-  
-  @Prop({ default: false })
-  confirmed!: boolean;
+  passwordHash!: string;
+
+  @Prop({ type: [Types.ObjectId], ref: 'Role', default: [] })
+  roles!: Types.ObjectId[];
+
+  @Prop({ type: Types.ObjectId, ref: 'Plan', default: null })
+  plan!: Types.ObjectId;
+
+  @Prop({ type: Object, default: {} })
+  metadata!: {
+    name?: string;
+    phone?: string;
+    avatarUrl?: string;
+    [key: string]: any;
+  };
 }
 
-export type UserDocument = Document<unknown, {}, User> & User & { _id: Types.ObjectId };
-
 export const UserSchema = SchemaFactory.createForClass(User);
+
+// Índices para búsquedas de HACL
+UserSchema.index({ tenantId: 1, roles: 1 });
+UserSchema.index({ tenantId: 1, plan: 1 });
+
+// Índice compuesto para (tenantId, email) con unicidad
+UserSchema.index({ tenantId: 1, email: 1 }, { unique: true });

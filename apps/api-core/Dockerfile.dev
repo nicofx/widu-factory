@@ -1,32 +1,21 @@
+# apps/api-core/Dockerfile.dev
+
 FROM node:20
 
+# 1) Trabajamos en /app
 WORKDIR /app
 COPY . .
 
-RUN npm install -g pnpm @nestjs/cli
-RUN pnpm install
+# 2) Instalamos pnpm y Nest CLI (no necesitamos toolchains)
+RUN npm install -g pnpm @nestjs/cli \
+    && pnpm install
 
+# 3) Build del código (para ver errores de TS en dev)
 WORKDIR /app/apps/api-core
-
-# No se necesita copiar templates porque en dev se leen desde src/
-# pero si querés mantener coherencia, podés hacerlo también
 RUN pnpm build && pnpm postbuild
 
+# 4) Exponemos puerto 3000
 EXPOSE 3000
 
+# 5) Arrancamos en modo hot-reload
 CMD ["pnpm", "start:dev"]
-
-
-# FROM node:20
-
-# WORKDIR /app
-# COPY . .
-
-# RUN npm install -g pnpm @nestjs/cli
-# RUN pnpm install
-
-# WORKDIR /app/apps/api-core
-
-# EXPOSE 3000
-
-# CMD ["pnpm", "start:dev"]
