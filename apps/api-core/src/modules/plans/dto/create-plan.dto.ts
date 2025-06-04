@@ -23,11 +23,11 @@ export class CreatePlanDto {
   @IsArray()
   @ArrayUnique()
   @IsString({ each: true })
-  readonly features?: string[];
+  readonly features?: string[]; // Características opcionales
 
   @IsOptional()
   @IsArray()
   @ArrayUnique()
   @IsString({ each: true })
-  readonly defaultRoles?: string[]; // IDs de Role
+  readonly defaultRoles?: string[]; // IDs de Role que vienen por defecto en este plan
 }

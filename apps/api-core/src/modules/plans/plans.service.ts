@@ -172,4 +172,9 @@ export class PlansService {
 
     await this.planModel.deleteOne({ _id: id, tenantId }).exec();
   }
+
+  async findByName(tenantId: string, name: string): Promise<Plan | null> {
+  return this.planModel.findOne({ tenantId, name }).exec();
+}
+
 }

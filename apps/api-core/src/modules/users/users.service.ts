@@ -16,6 +16,9 @@ import { promisify } from 'util';
 import { User } from './schemas/user.schema';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
+import { MailerService } from '../../common/mailer/mailer.service';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
 
 // Convertimos la versión callback de scrypt a una que devuelve promise
 const scrypt = promisify(_scrypt);
@@ -24,6 +27,9 @@ const scrypt = promisify(_scrypt);
 export class UsersService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<User>,
+    private readonly mailerService: MailerService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
   ) {}
   
   /**
@@ -32,47 +38,50 @@ export class UsersService {
   * @param createUserDto — Data mínima para crear un usuario.
   * @returns El usuario creado, sin el campo passwordHash.
   */
-  async create(
-    tenantId: string,
-    createUserDto: CreateUserDto,
-  ): Promise<Partial<User>> {
-    const { email, password, name, phone, avatarUrl } = createUserDto;
+  async create(tenantId: string, createUserDto: CreateUserDto): Promise<User> {
+    // 1) validar si ya existe correo
+    const exists = await this.userModel.findOne({ tenantId, email: createUserDto.email });
+    if (exists) throw new ConflictException('Email ya registrado.');
     
-    // 1) Verificar duplicado: buscar si ya existe un usuario con (tenantId, email)
-    const existing = await this.userModel
-    .findOne({ tenantId, email })
-    .exec();
-    if (existing) {
-      throw new ConflictException(
-        `En este tenant ya existe un usuario con email "${email}".`,
-      );
-    }
-    
-    // 2) Generar salt aleatorio (16 bytes), convertir a string hex
-    const salt = randomBytes(16).toString('hex');
-    
-    // 3) Generar hash con scrypt (tamaño 64 bytes → Buffer)
-    const derivedKey = (await scrypt(password, salt, 64)) as Buffer;
-    
-    // 4) Concatenar “salt:hashEnHex” para almacenar
+    // 2) generar salt + hash y guardarlo
+    const salt = randomBytes(8).toString('hex');
+    const derivedKey = (await scrypt(createUserDto.password, salt, 64)) as Buffer;
     const passwordHash = `${salt}:${derivedKey.toString('hex')}`;
     
-    // 5) Crear el documento con campo tenantId
-    const created = new this.userModel({
+    const newUser = new this.userModel({
       tenantId,
-      email,
+      email: createUserDto.email,
       passwordHash,
-      roles: [], // se asignan en endpoints específicos
-      plan: null,
-      metadata: { name, phone, avatarUrl },
+      roles: createUserDto.roles || [],
+      plan: createUserDto.plan || null,
+      metadata: createUserDto.metadata || {},
+    });
+    const savedUser = await newUser.save();
+    
+    // 3) generar token JWT para verificación (payload mínimo)
+    const payload = {
+      sub: savedUser._id.toString(),
+      tenantId: savedUser.tenantId,
+      email: savedUser.email,
+    };
+    const expiresIn = this.configService.get<string>('EMAIL_TOKEN_EXPIRES_IN') || '24h';
+    const verificationToken = this.jwtService.sign(payload, {
+      secret: this.configService.get<string>('JWT_SECRET'),
+      expiresIn,
     });
     
-    const saved = await created.save();
-    // Omitimos passwordHash en la respuesta
-    const { passwordHash: _, ...result } = saved.toObject();
-    return result;
+    // 4) enviar correo de verificación
+    await this.mailerService.sendVerificationEmail(
+      tenantId,
+      savedUser.email,
+      savedUser.metadata?.name || savedUser.email,
+      verificationToken,
+    );
+    
+    // 5) retornar usuario sin passwordHash
+    const { passwordHash: _passwordHash, ...userObj } = savedUser.toObject();
+    return userObj as any;
   }
-  
   
   
   /**
@@ -295,5 +304,19 @@ export class UsersService {
       this.userModel.countDocuments(filter).exec(),
     ]);
     return { data, total };
+  }
+  
+  async updatePassword(
+    tenantId: string,
+    userId: string,
+    newPasswordHash: string,
+  ): Promise<void> {
+    const result = await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { passwordHash: newPasswordHash },
+    );
+    if (result.matchedCount === 0) {
+      throw new NotFoundException('Usuario no encontrado.');
+    }
   }
 }

@@ -11,20 +11,30 @@ import {
   HttpCode,
   HttpStatus,
   Headers,
+  UseGuards,
+  Query,
   ParseIntPipe,
-  Query
 } from '@nestjs/common';
 import { PlansService } from './plans.service';
 import { CreatePlanDto } from './dto/create-plan.dto';
 import { UpdatePlanDto } from './dto/update-plan.dto';
 
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { Permissions } from '../../common/decorators/permissions.decorator';
+
 @Controller('plans')
+@UseGuards(JwtAuthGuard, TenantGuard)
 export class PlansController {
   constructor(private readonly plansService: PlansService) {}
-  
+
   /**
-  * Crear un plan en este tenant.
-  */
+   * POST /plans
+   * - Sólo usuarios con permiso 'plans.create'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.create')
   @Post()
   @HttpCode(HttpStatus.CREATED)
   async create(
@@ -34,24 +44,38 @@ export class PlansController {
     const tenantId = tenantIdHeader?.trim() || 'default';
     return await this.plansService.create(tenantId, createDto);
   }
-  
+
   /**
-  * Listar todos los planes en este tenant.
-  */
+   * GET /plans?search=&page=&limit=
+   * - Sólo usuarios con permiso 'plans.read'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.read')
   @Get()
   async findAll(
     @Headers('x-tenant-id') tenantIdHeader: string,
     @Query('search') search?: string,
-    @Query('page', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) page = 1,
-    @Query('limit', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) limit = 10,
+    @Query(
+      'page',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    page = 1,
+    @Query(
+      'limit',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    limit = 10,
   ) {
     const tenantId = tenantIdHeader?.trim() || 'default';
     return await this.plansService.findAll(tenantId, search, page, limit);
   }
-  
+
   /**
-  * Obtener un plan por ID (en este tenant).
-  */
+   * GET /plans/:id
+   * - Sólo usuarios con permiso 'plans.read'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.read')
   @Get(':id')
   async findOne(
     @Headers('x-tenant-id') tenantIdHeader: string,
@@ -60,10 +84,13 @@ export class PlansController {
     const tenantId = tenantIdHeader?.trim() || 'default';
     return await this.plansService.findOne(tenantId, id);
   }
-  
+
   /**
-  * Actualizar un plan (precio, features, roles por defecto).
-  */
+   * PATCH /plans/:id
+   * - Sólo usuarios con permiso 'plans.update'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.update')
   @Patch(':id')
   async update(
     @Headers('x-tenant-id') tenantIdHeader: string,
@@ -73,10 +100,13 @@ export class PlansController {
     const tenantId = tenantIdHeader?.trim() || 'default';
     return await this.plansService.update(tenantId, id, updateDto);
   }
-  
+
   /**
-  * Eliminar un plan (hard delete).
-  */
+   * DELETE /plans/:id
+   * - Sólo usuarios con permiso 'plans.delete'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.delete')
   @Delete(':id')
   @HttpCode(HttpStatus.NO_CONTENT)
   async remove(

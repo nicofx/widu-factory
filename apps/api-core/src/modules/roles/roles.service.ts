@@ -17,56 +17,72 @@ import { UpdateRoleDto } from './dto/update-role.dto';
 
 // Inyectamos PermissionsService para validar IDs de permisos
 import { PermissionsService } from '../permissions/permissions.service';
+import { CacheService } from '../../common/cache/cache.service';
 
 @Injectable()
 export class RolesService {
   constructor(
     @InjectModel(Role.name) private readonly roleModel: Model<Role>,
+
+    // forwardRef para resolver posible dependencia circular con PermissionsModule
     @Inject(forwardRef(() => PermissionsService))
     private readonly permissionsService: PermissionsService,
+
+    private readonly cacheService: CacheService,
   ) {}
-  
+
   /**
-  * Crear un nuevo rol en un tenant dado.
-  * @param tenantId — Tenant actual (header).
-  * @param createRoleDto — { name, permissions[] }.
-  */
+   * Busca un rol por nombre dentro de un tenant (se usa en Seeder y validaciones).
+   */
+  async findByName(tenantId: string, name: string): Promise<Role | null> {
+    return this.roleModel.findOne({ tenantId, name, deleted: false }).exec();
+  }
+
+  /**
+   * Crear un nuevo rol en un tenant dado.
+   */
   async create(
     tenantId: string,
     createRoleDto: CreateRoleDto,
   ): Promise<Role> {
     const { name, permissions } = createRoleDto;
-    
+
     // 1) Chequear duplicado por (tenantId, name)
     const exist = await this.roleModel.findOne({ tenantId, name }).exec();
     if (exist) {
       throw new ConflictException(`El rol "${name}" ya existe en este tenant.`);
     }
-    
-    // 2) Validar que cada permiso exista y pertenezca al mismo tenant
+
+    // 2) Validar que cada permiso exista en este tenant
     for (const permId of permissions) {
       if (!Types.ObjectId.isValid(permId)) {
         throw new BadRequestException(`ID de permiso inválido: ${permId}`);
       }
       const permExists = await this.permissionsService.findOne(tenantId, permId);
       if (!permExists) {
-        throw new BadRequestException(`Permiso con ID "${permId}" no existe en este tenant.`);
+        throw new BadRequestException(
+          `Permiso con ID "${permId}" no existe en este tenant.`,
+        );
       }
     }
-    
+
     // 3) Creamos el rol
     const created = new this.roleModel({
       tenantId,
       name,
-      permissions: permissions.map(id => new Types.ObjectId(id)),
+      permissions: permissions.map((id) => new Types.ObjectId(id)),
       deleted: false,
     });
-    return await created.save();
+
+    const saved = await created.save();
+    // 4) Invalidar cache de permisos para este tenant
+    await this.cacheService.del(`permissions:${tenantId}:*`);
+    return saved;
   }
-  
+
   /**
-  * Listar roles (no borrados) de un tenant.
-  */
+   * Listar roles (no borrados) de un tenant.
+   */
   async findAll(
     tenantId: string,
     searchTerm?: string,
@@ -79,37 +95,31 @@ export class RolesService {
       filter.name = { $regex: searchTerm, $options: 'i' };
     }
     const [data, total] = await Promise.all([
-      this.roleModel
-      .find(filter)
-      .skip(skip)
-      .limit(limit)
-      .exec(),
+      this.roleModel.find(filter).skip(skip).limit(limit).exec(),
       this.roleModel.countDocuments(filter).exec(),
     ]);
     return { data, total };
   }
+
   /**
-  * Obtener un solo rol por ID, validando tenant y que no esté borrado.
-  */
+   * Obtener un solo rol por ID, validando tenant y que no esté borrado.
+   */
   async findOne(tenantId: string, id: string): Promise<Role> {
     if (!Types.ObjectId.isValid(id)) {
       throw new BadRequestException('ID de rol inválido');
     }
     const role = await this.roleModel
-    .findOne({ _id: id, tenantId, deleted: false })
-    .exec();
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
     if (!role) {
       throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
     }
     return role;
   }
-  
+
   /**
-  * Actualizar un rol dentro de un tenant.
-  * - Validar que el rol exista y no esté borrado.
-  * - Si se renombra, verificar duplicado en el mismo tenant.
-  * - Si cambian permisos, validar que existan en el mismo tenant.
-  */
+   * Actualizar un rol dentro de un tenant.
+   */
   async update(
     tenantId: string,
     id: string,
@@ -119,23 +129,23 @@ export class RolesService {
       throw new BadRequestException('ID de rol inválido');
     }
     const role = await this.roleModel
-    .findOne({ _id: id, tenantId, deleted: false })
-    .exec();
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
     if (!role) {
       throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
     }
-    
+
     // Si renombramos
     if (updateRoleDto.name && updateRoleDto.name !== role.name) {
       const exist = await this.roleModel
-      .findOne({ tenantId, name: updateRoleDto.name })
-      .exec();
+        .findOne({ tenantId, name: updateRoleDto.name })
+        .exec();
       if (exist) {
         throw new ConflictException(`El rol "${updateRoleDto.name}" ya existe en este tenant.`);
       }
       role.name = updateRoleDto.name;
     }
-    
+
     // Si cambiamos permisos
     if (updateRoleDto.permissions) {
       for (const permId of updateRoleDto.permissions) {
@@ -147,37 +157,38 @@ export class RolesService {
           throw new BadRequestException(`Permiso con ID "${permId}" no existe en este tenant.`);
         }
       }
-      role.permissions = updateRoleDto.permissions.map(id => new Types.ObjectId(id));
+      role.permissions = updateRoleDto.permissions.map((id) => new Types.ObjectId(id));
     }
-    
+
+    // Invalidar cache luego de cambios
+    await this.cacheService.del(`permissions:${tenantId}:*`);
     return await role.save();
   }
-  
+
   /**
-  * “Soft-delete” de rol: marcamos deleted = true.
-  * No eliminamos físicamente, para futura auditoría.
-  */
+   * “Soft-delete” de rol: marcamos deleted = true.
+   */
   async remove(tenantId: string, id: string): Promise<void> {
     if (!Types.ObjectId.isValid(id)) {
       throw new BadRequestException('ID de rol inválido');
     }
     const role = await this.roleModel
-    .findOne({ _id: id, tenantId, deleted: false })
-    .exec();
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
     if (!role) {
       throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
     }
-    
-    // 🔴 Nota: en Sprint 4/5 validaremos que ningún usuario dependa de este rol,
-    // antes de permitir borrarlo. Por ahora, sólo lo marcamos como deleted.
+
     role.deleted = true;
     await role.save();
+    // Invalidar cache luego de borrado
+    await this.cacheService.del(`permissions:${tenantId}:*`);
   }
-  
+
   /**
-  * Eliminar de forma “hard” un permiso de todos los roles de este tenant.
-  * - Llamado cuando se borra un permiso en esta tenant.
-  */
+   * Eliminación “hard” de un permiso de todos los roles de este tenant.
+   * (Se invoca cuando se borra un permiso en PermissionsService.)
+   */
   async removePermissionFromAllRoles(
     tenantId: string,
     permissionId: string,
@@ -190,60 +201,93 @@ export class RolesService {
       { $pull: { permissions: new Types.ObjectId(permissionId) } },
     );
   }
-  
+
   /**
-  * Reemplazar permiso en los roles (no aplica con IDs, queda como placeholder).
-  * En este momento guardamos permissions por ObjectId, así que renombrar
-  * un permiso no obliga a modificar nada en los roles.
-  */
+   * Reemplazar permiso en los roles:
+   * - Busca todos los roles de este tenant que contengan oldPermissionId en su array `permissions`.
+   * - En cada rol, reemplaza oldPermissionId por newPermissionId (con el mismo orden en el array).
+   */
   async replacePermissionInRoles(
     tenantId: string,
     oldPermissionId: string,
     newPermissionId: string,
   ): Promise<void> {
-    // No‐op para IDs, pero dejamos firma por si en el futuro guardamos nombres de permiso.
-    return;
-  }
-  
-  // Nuevo método para buscar muchos permisos por ID:
-  // Este método iría en PermissionsService (ver más abajo).
+    if (
+      !Types.ObjectId.isValid(oldPermissionId) ||
+      !Types.ObjectId.isValid(newPermissionId)
+    ) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
 
-    /**
-   * Dado un array de roleIds (strings), devuelve un array de nombres
-   * de permiso (string) que el usuario debería tener en base a esos roles.
+    const oldId = new Types.ObjectId(oldPermissionId);
+    const newId = new Types.ObjectId(newPermissionId);
+
+    // Actualizamos en una sola operación usando un pipeline de MongoDB para mapear el array
+    await this.roleModel.updateMany(
+      { tenantId, permissions: oldId },
+      [
+        {
+          $set: {
+            permissions: {
+              $map: {
+                input: '$permissions',
+                as: 'p',
+                in: {
+                  $cond: [{ $eq: ['$$p', oldId] }, newId, '$$p'],
+                },
+              },
+            },
+          },
+        },
+      ],
+    );
+    // Nota: Si un rol ya contenía newPermissionId junto con oldPermissionId,
+    // aparecerá duplicado en el arreglo. Si deseas eliminar duplicados, podrías
+    // usar una segunda etapa en el pipeline para aplicar $setUnion. Por simplicidad,
+    // dejamos la lógica básica.
+  }
+
+  /**
+   * Dado un array de roleIds, devuelve un array de nombres de permiso
+   * (con cache en Redis). No se toca esta parte.
    */
   async getPermissionsForRoles(
     tenantId: string,
     roleIds: string[],
   ): Promise<string[]> {
-    // 1) Mapear a ObjectId
+    const sortedIds = [...roleIds].sort().join(',');
+    const cacheKey = `permissions:${tenantId}:${sortedIds}`;
+
+    const cached = await this.cacheService.getJSON<string[]>(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+
     const objectIds = roleIds.map((r) => new Types.ObjectId(r));
-    // 2) Buscar roles (asegurándonos de que pertenezcan al mismo tenant y no estén borrados)
     const roles = await this.roleModel
-      .find({
-        tenantId,
-        _id: { $in: objectIds },
-        deleted: false,
-      })
+      .find({ tenantId, _id: { $in: objectIds }, deleted: false })
       .exec();
-    // 3) Recopilar todos los permission ObjectIds de cada rol
+
     const permIds = roles.reduce<Types.ObjectId[]>((acc, role) => {
       role.permissions?.forEach((p) => acc.push(p));
       return acc;
     }, []);
+
     if (permIds.length === 0) {
+      await this.cacheService.setJSON(cacheKey, [], 3600);
       return [];
     }
-    // 4) Eliminar duplicados de ObjectId
+
     const uniqueIds = Array.from(new Set(permIds.map((p) => p.toString()))).map(
       (id) => new Types.ObjectId(id),
     );
-    // 5) Usar PermissionsService para obtener el nombre de cada permiso
     const permissions = await this.permissionsService.findManyByIds(
       tenantId,
       uniqueIds,
-    ); // findManyByIds retorna array de Permission con campo name
-    return permissions.map((perm) => perm.name);
-  }
+    );
+    const permissionNames = permissions.map((perm) => perm.name);
 
+    await this.cacheService.setJSON(cacheKey, permissionNames, 3600);
+    return permissionNames;
+  }
 }

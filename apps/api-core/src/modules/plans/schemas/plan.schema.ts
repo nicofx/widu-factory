@@ -1,4 +1,5 @@
 // apps/api-core/src/modules/plans/schemas/plan.schema.ts
+
 import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
 import { Document, Types } from 'mongoose';
 

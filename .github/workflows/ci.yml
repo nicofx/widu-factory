@@ -1,0 +1,85 @@
+# .github/workflows/ci.yml
+
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies (root)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build API (root monorepo)
+        run: |
+          cd apps/api-core
+          pnpm install
+          pnpm build:docker
+
+      - name: Run lint (root)
+        run: pnpm lint
+
+      - name: Run unit tests (API)
+        run: |
+          cd apps/api-core
+          pnpm test -- --coverage
+      - name: Upload coverage report
+        if: success()
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: apps/api-core/coverage
+
+  build-docker:
+    needs: build-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+          cache: 'pnpm'
+
+      - name: Install dependencies (root)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Docker image (sin cache)
+        run: |
+          docker build \
+            --build-arg NODE_ENV=production \
+            -f apps/api-core/Dockerfile \
+            -t widu-factory-api-core:ci \
+            .
+
+      - name: Push image to Docker Hub (opcional)
+        if: github.event_name == 'push'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Tag & Push
+        if: github.event_name == 'push'
+        run: |
+          docker tag widu-factory-api-core:ci yourdockerhubuser/widu-factory-api-core:latest
+          docker push yourdockerhubuser/widu-factory-api-core:latest

@@ -17,5 +17,5 @@ export class CreateRoleDto {
   @ArrayNotEmpty()
   @ArrayUnique()
   @IsString({ each: true })
-  readonly permissions!: string[];
+  readonly permissions!: string[]; // IDs de permiso (como strings)
 }

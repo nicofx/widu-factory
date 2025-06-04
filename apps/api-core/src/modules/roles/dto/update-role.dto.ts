@@ -18,5 +18,5 @@ export class UpdateRoleDto {
   @ArrayNotEmpty()
   @ArrayUnique()
   @IsString({ each: true })
-  readonly permissions?: string[];
+  readonly permissions?: string[]; // IDs de permiso opcionales
 }

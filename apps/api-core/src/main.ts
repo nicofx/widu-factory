@@ -9,34 +9,45 @@ import { AppModule } from './app.module';
 import { NestFactory } from '@nestjs/core';
 import { TenantMiddleware } from './common/middlewares/tenant.middleware';
 import { GlobalHttpExceptionFilter } from './common/filters/http-exception.filter';
+import { SeederService } from './common/seeder/seeder.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
-
-
+  
+  
+  // Ejecutar seed antes de arrancar listeners
+  const seeder = app.get(SeederService);
+  try {
+    await seeder.seed();
+  } catch (err) {
+    // Si falla el seed, lo registramos pero seguimos con arranque
+    console.error('Error durante seed inicial:', err);
+  }
+  
+  
   // Middleware global para tenant
   app.use(new TenantMiddleware().use);
-
+  
   // Swagger / OpenAPI
   const config = new DocumentBuilder()
-    .setTitle('Widu Factory API')
-    .setDescription('API Core de Widu Factory (Multi-tenant, HACL, Auth)')
-    .setVersion('1.0')
-    .addBearerAuth(
-      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
-      'Authorization',
-    )
-    .addApiKey(
-      { type: 'apiKey', name: 'x-tenant-id', in: 'header', description: 'Tenant ID header' },
-      'TenantId',
-    )
-    .build();
-
+  .setTitle('Widu Factory API')
+  .setDescription('API Core de Widu Factory (Multi-tenant, HACL, Auth)')
+  .setVersion('1.0')
+  .addBearerAuth(
+    { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+    'Authorization',
+  )
+  .addApiKey(
+    { type: 'apiKey', name: 'x-tenant-id', in: 'header', description: 'Tenant ID header' },
+    'TenantId',
+  )
+  .build();
+  
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document);
-
+  
   app.useGlobalFilters(new GlobalHttpExceptionFilter());  // 👈
-
+  
   await app.listen(3000);
   
   console.log('🚀 API corriendo en http://0.0.0.0:3000');

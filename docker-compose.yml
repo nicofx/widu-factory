@@ -10,16 +10,29 @@ services:
     volumes:
       - /var/widu/mongo-data:/data/db
 
+  redis:
+    image: redis:7
+    container_name: widu-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
   api-core:
     build:
       context: .
       dockerfile: apps/api-core/Dockerfile
+    container_name: widu-api-core
+    restart: always
     ports:
       - "3000:3000"
     depends_on:
       - mongo
+      - redis
     environment:
       - CONFIG_PATH=apps/api-core/config
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     volumes:
       - ./config/.env.dev:/app/.env
 

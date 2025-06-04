@@ -1,0 +1,5677 @@
+// apps/api-core/src/app.module.ts
+import { Module } from '@nestjs/common';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { ConfigModule } from '@nestjs/config';
+import { MongooseModule } from '@nestjs/mongoose';
+
+/* ─── Módulos de negocio ─── */
+
+/* ─── Middleware global ─── */
+import { TenantMiddleware } from './common/middlewares/tenant.middleware';
+
+/* ─── Pipeline (layout nuevo) ─── */
+import { PipelineCoreModule } from './pipeline/core/pipeline-core.module';
+import { PipelineExtensionsModule } from './pipeline/extensions/pipeline-extensions.module';
+import { PipelineFactoryModule } from './pipeline/factory/pipeline-factory.module';
+import { PipelineInterceptor } from './pipeline/interceptors/pipeline.interceptor';
+
+/* ─── Módulo de pruebas / demos ─── */
+import { TestingModule } from './testing/testing.module';
+import { UsersModule } from './modules/users/users.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { PermissionsModule } from './modules/permissions/permissions.module';
+import { PlansModule } from './modules/plans/plans.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { HealthModule } from './modules/health/health.module';
+import { LoggingModule } from './common/logging/logging.module';
+import { AuditModule } from './common/audit/audit.module';
+import { AuditInterceptor } from './common/audit/audit.interceptor';
+import { MailerModule } from './common/mailer/mailer.module';
+import { CacheModule } from './common/cache/cache.module';
+import { FileModule } from './modules/files/file.module';
+import { SessionModule } from './modules/sessions/session.module';
+import { TenantsModule } from './modules/tenants/tenants.module';
+import { SeederModule } from './common/seeder/seeder.module';
+// import { ThrottlerModule } from '@nestjs/throttler';
+
+@Module({
+  imports: [
+    /* Config env global */
+    ConfigModule.forRoot({
+      envFilePath: '/app/.env',
+      isGlobal: true,
+    }),
+
+    
+    /* MongoDB */
+    MongooseModule.forRootAsync({
+      useFactory: () => ({ uri: process.env.MONGO_URI }),
+    }),
+    
+    /* Módulos Base */
+    UsersModule,
+    RolesModule,
+    PermissionsModule,
+    PlansModule,
+    AuthModule,
+    HealthModule,
+    LoggingModule,
+    AuditModule,
+    MailerModule,
+    CacheModule,
+    FileModule,
+    SessionModule,
+    TenantsModule,
+    SeederModule,
+    /* Módulos de negocio */
+    
+    /* ─── Pipeline reorganizado ─── */
+    PipelineCoreModule,        // motor + subsistemas
+    PipelineExtensionsModule,  // pasos & hooks + STEP_REGISTRY
+    PipelineFactoryModule,     // token 'PIPELINE_FACTORY'
+    
+    /* Módulo de pruebas */
+    TestingModule,
+  ],
+  providers: [
+    TenantMiddleware,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: PipelineInterceptor,
+    },
+    {
+      provide: 'APP_INTERCEPTOR',
+      useClass: AuditInterceptor,
+    },
+  ],
+})
+export class AppModule {}
+// apps/api-core/src/common/audit/audit.interceptor.ts
+
+import {
+  Injectable,
+  NestInterceptor,
+  ExecutionContext,
+  CallHandler,
+} from '@nestjs/common';
+import { Observable, tap } from 'rxjs';
+import { Request } from 'express';
+import { AuditService } from './audit.service';
+import { Reflector } from '@nestjs/core';
+
+/**
+ * Mapear rutas críticas a acciones. 
+ * Ejemplo: POST /users -> 'create:user'
+ *          PATCH /roles/:id -> 'update:role'
+ *          DELETE /plans/:id -> 'delete:plan'
+ */
+const ACTION_MAP: Record<string, string> = {
+  'POST:/users': 'create:user',
+  'PATCH:/users': 'update:user',
+  'DELETE:/users': 'delete:user',
+  'POST:/roles': 'create:role',
+  'PATCH:/roles': 'update:role',
+  'DELETE:/roles': 'delete:role',
+  'POST:/permissions': 'create:permission',
+  'PATCH:/permissions': 'update:permission',
+  'DELETE:/permissions': 'delete:permission',
+  'POST:/plans': 'create:plan',
+  'PATCH:/plans': 'update:plan',
+  'DELETE:/plans': 'delete:plan',
+};
+
+@Injectable()
+export class AuditInterceptor implements NestInterceptor {
+  constructor(
+    private readonly auditService: AuditService,
+    private readonly reflector: Reflector,
+  ) {}
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const req: Request = context.switchToHttp().getRequest();
+    const { method, originalUrl, body } = req;
+    const user = (req as any).user || {}; // viene de JwtStrategy
+    const tenantId: string = (req.headers['x-tenant-id'] as string) || 'default';
+    const key = `${method}:${originalUrl.split('?')[0]}`; // ignorar params
+
+    const action = ACTION_MAP[key];
+    if (!action) {
+      // No auditear rutas que no estén mapeadas
+      return next.handle();
+    }
+
+    // Antes de ejecutar la request, guardamos datos “before”
+    let beforeData: any = null;
+    // Si es PATCH o DELETE, podríamos recuperar el recurso actual:
+    // Ejemplo: GET user actual antes de update o delete.
+    // Para simplificar, no implementamos fetch “before” genérico aquí.
+    // Podrías extender esta sección si lo deseas.
+
+    return next.handle().pipe(
+      tap(async (responseData) => {
+        // Después de que el controlador se ejecute, guardamos “after” y metadatos
+        const resourceId = req.params['id'] || (responseData?._id?.toString()) || '';
+        const metadata = {
+          before: beforeData,
+          after: responseData,
+          body: body,
+        };
+        await this.auditService.log(
+          tenantId,
+          user.userId,
+          action,
+          action.split(':')[1], // 'user', 'role', etc.
+          resourceId,
+          metadata,
+        );
+      }),
+    );
+  }
+}
+// apps/api-core/src/common/audit/audit.module.ts
+
+import { Global, Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { AuditLog, AuditLogSchema } from './audit.schema';
+import { AuditService } from './audit.service';
+
+@Global()
+@Module({
+  imports: [MongooseModule.forFeature([{ name: AuditLog.name, schema: AuditLogSchema }])],
+  providers: [AuditService],
+  exports: [AuditService],
+})
+export class AuditModule {}
+// apps/api-core/src/common/audit/audit.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class AuditLog extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  userId!: string; // quién hizo la acción
+
+  @Prop({ required: true })
+  action!: string; // e.g. 'create:user', 'update:role'
+
+  @Prop({ required: true })
+  resourceType!: string; // 'User', 'Role', 'Permission', 'Plan'
+
+  @Prop({ required: true })
+  resourceId!: string; // ObjectId o identificador del recurso
+
+  @Prop({ type: Object, default: {} })
+  metadata: any; // { before: {...}, after: {...} }
+}
+
+export const AuditLogSchema = SchemaFactory.createForClass(AuditLog);
+
+// ÍNDICE para búsquedas por tenant+user+fecha
+AuditLogSchema.index({ tenantId: 1, userId: 1, createdAt: -1 });
+// apps/api-core/src/common/audit/audit.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+import { AuditLog } from './audit.schema';
+
+@Injectable()
+export class AuditService {
+  constructor(
+    @InjectModel(AuditLog.name) private readonly auditModel: Model<AuditLog>,
+  ) {}
+
+  /**
+   * Registra una entrada de auditoría.
+   * @param tenantId 
+   * @param userId 
+   * @param action 
+   * @param resourceType 
+   * @param resourceId 
+   * @param metadata 
+   */
+  async log(
+    tenantId: string,
+    userId: string,
+    action: string,
+    resourceType: string,
+    resourceId: string,
+    metadata: any = {},
+  ) {
+    const entry = new this.auditModel({
+      tenantId,
+      userId,
+      action,
+      resourceType,
+      resourceId,
+      metadata,
+    });
+    await entry.save();
+  }
+
+  /**
+   * Listar audit logs con paginación y filtro opcional.
+   */
+  async findAll(
+    tenantId: string,
+    page = 1,
+    limit = 20,
+    filter: Partial<{ action: string; resourceType: string; userId: string }> = {},
+  ): Promise<{ data: AuditLog[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const query: any = { tenantId, ...filter };
+    const [data, total] = await Promise.all([
+      this.auditModel.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit).exec(),
+      this.auditModel.countDocuments(query).exec(),
+    ]);
+    return { data, total };
+  }
+}
+// apps/api-core/src/common/cache/cache.module.ts
+
+import { Global, Module } from '@nestjs/common';
+import { CacheService } from './cache.service';
+
+@Global()
+@Module({
+  providers: [CacheService],
+  exports: [CacheService],
+})
+export class CacheModule {}
+// apps/api-core/src/common/cache/cache.service.ts
+
+import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import Redis from 'ioredis';
+
+@Injectable()
+export class CacheService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(CacheService.name);
+  private redisClient!: Redis;
+
+  onModuleInit() {
+    // Crear el cliente de Redis al iniciar el módulo.
+    this.redisClient = new Redis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: +(process.env.REDIS_PORT || 6379),
+      password: process.env.REDIS_PASSWORD || undefined,
+    });
+
+    this.redisClient.on('connect', () => {
+      this.logger.log('Conectado a Redis');
+    });
+    this.redisClient.on('error', (err) => {
+      this.logger.error('Error en cliente Redis', err);
+    });
+  }
+
+  async onModuleDestroy() {
+    // Cerrar la conexión cuando la app se detenga.
+    await this.redisClient.quit();
+  }
+
+  /**
+   * Obtener un valor JSON almacenado en Redis.
+   * - Si la clave no existe o no es JSON válido, devuelve null.
+   */
+  async getJSON<T>(key: string): Promise<T | null> {
+    try {
+      const data = await this.redisClient.get(key);
+      if (!data) return null;
+      return JSON.parse(data) as T;
+    } catch (err) {
+      this.logger.error(`Error al leer o parsear JSON de cache en key=${key}`, err);
+      return null;
+    }
+  }
+
+  /**
+   * Guardar un objeto como JSON en Redis, con TTL (en segundos).
+   */
+  async setJSON(key: string, value: any, ttlSeconds: number): Promise<void> {
+    try {
+      const stringified = JSON.stringify(value);
+      await this.redisClient.set(key, stringified, 'EX', ttlSeconds);
+    } catch (err) {
+      this.logger.error(`Error al guardar JSON en cache key=${key}`, err);
+    }
+  }
+
+  /**
+   * Eliminar una clave o, si incluyes '*', todas las que coincidan.
+   */
+  async del(keyPattern: string): Promise<void> {
+    try {
+      if (keyPattern.includes('*')) {
+        const keys = await this.redisClient.keys(keyPattern);
+        if (keys.length > 0) {
+          await this.redisClient.del(...keys);
+        }
+      } else {
+        await this.redisClient.del(keyPattern);
+      }
+    } catch (err) {
+      this.logger.error(`Error al eliminar clave(s) de cache patrón=${keyPattern}`, err);
+    }
+  }
+}
+// apps/api-core/src/common/decorators/permissions.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+// Clave de metadata que usaremos en PermissionsGuard
+export const PERMISSIONS_KEY = 'permissions';
+
+/**
+ * @Permissions('users.create', 'users.delete')
+ * añade metadata ['users.create','users.delete'] al manejador
+ */
+export const Permissions = (...permissions: string[]) =>
+  SetMetadata(PERMISSIONS_KEY, permissions);
+// apps/api-core/src/common/decorators/roles.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+// Clave de metadata que usaremos en RolesGuard
+export const ROLES_KEY = 'roles';
+
+/**
+ * @Roles('admin', 'manager')
+ * añade metadata ['admin','manager'] al manejador
+ */
+export const Roles = (...roles: string[]) => SetMetadata(ROLES_KEY, roles);
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+} from '@nestjs/common';
+import { BasePipelineError } from '../../pipeline/core/errors/base-error';
+
+@Catch()
+export class GlobalHttpExceptionFilter implements ExceptionFilter {
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx   = host.switchToHttp();
+    const res   = ctx.getResponse();
+    const req   = ctx.getRequest();
+
+    /* ── Mapear tipo de error → status ───────────────────── */
+    let status = 500;
+    let body: any = { success: false };
+
+    if (exception instanceof BasePipelineError) {
+      status = exception.status;
+      body   = {
+        ...body,
+        error: exception.constructor.name,
+        message: exception.message,
+        details: (exception as any).details,
+      };
+    } else if (exception instanceof HttpException) {
+      status = exception.getStatus();
+      body   = { ...body, message: exception.message };
+    } else {
+      body.message = 'Internal server error';
+      console.error('[UNHANDLED]', exception);
+    }
+
+    /* ── Formato de respuesta consistente ─────────────────── */
+    res.status(status).json({
+      ...body,
+      timestamp: new Date().toISOString(),
+      path: req.url,
+      requestId: req?.pipelineContext?.requestId,
+    });
+  }
+}
+// apps/api-core/src/common/guards/permissions.guard.ts
+
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  ForbiddenException,
+  Logger,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { PERMISSIONS_KEY } from '../decorators/permissions.decorator';
+
+@Injectable()
+export class PermissionsGuard implements CanActivate {
+  private readonly logger = new Logger(PermissionsGuard.name);
+
+  constructor(private reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredPerms = this.reflector.get<string[]>(
+      PERMISSIONS_KEY,
+      context.getHandler(),
+    );
+    // Si no hay permisos definidos, dejamos pasar
+    if (!requiredPerms || requiredPerms.length === 0) {
+      return true;
+    }
+
+    const request = context.switchToHttp().getRequest();
+    const user = request.user; // viene del JwtStrategy
+
+    // user.permissions debe existir en payload del token
+    const userPerms: string[] = user?.permissions || [];
+
+    // Chequeamos que TODOS los permissions requeridos estén en user.permissions
+    const hasAll = requiredPerms.every((p) => userPerms.includes(p));
+    if (!hasAll) {
+      this.logger.warn(
+        `Acceso denegado. userId=${user?.userId} tenantId=${user?.tenantId} ` +
+        `ruta=${request.method} ${request.url} faltan permisos en [${requiredPerms.join(
+          ',',
+        )}]`,
+      );
+      throw new ForbiddenException('No tienes los permisos necesarios para acceder.');
+    }
+    return true;
+  }
+}
+// apps/api-core/src/common/guards/roles.guard.ts
+
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  ForbiddenException,
+  Logger,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { ROLES_KEY } from '../decorators/roles.decorator';
+
+@Injectable()
+export class RolesGuard implements CanActivate {
+  private readonly logger = new Logger(RolesGuard.name);
+
+  constructor(private reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const requiredRoles = this.reflector.get<string[]>(
+      ROLES_KEY,
+      context.getHandler(),
+    );
+    // Si no hay roles definidos, dejamos pasar
+    if (!requiredRoles || requiredRoles.length === 0) {
+      return true;
+    }
+
+    const request = context.switchToHttp().getRequest();
+    const user = request.user; // viene del JwtStrategy
+
+    // user.roles debe existir en payload del token
+    const userRoles: string[] = user?.roles || [];
+
+    // Chequeamos si alguno de los roles del user coincide con los requeridos
+    const hasRole = userRoles.some((r) => requiredRoles.includes(r));
+    if (!hasRole) {
+      // Log de intento de acceso denegado
+      this.logger.warn(
+        `Acceso denegado. userId=${user?.userId} tenantId=${user?.tenantId} ` +
+        `ruta=${request.method} ${request.url} falta rol en [${requiredRoles.join(',')}]`,
+      );
+      throw new ForbiddenException('No tienes el rol necesario para acceder.');
+    }
+    return true;
+  }
+}
+// apps/api-core/src/common/guards/session.guard.ts
+
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { SessionService } from '../../modules/sessions/session.service';
+
+@Injectable()
+export class SessionGuard implements CanActivate {
+  constructor(private readonly sessionService: SessionService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest();
+    const payload = req.user; // Inyectado por JwtStrategy
+    const { tenantId, sessionId } = payload;
+    if (!sessionId) {
+      throw new UnauthorizedException('Token sin sessionId.');
+    }
+    const active = await this.sessionService.isSessionActive(tenantId, sessionId);
+    if (!active) {
+      throw new UnauthorizedException('Sesión revocada o expirada.');
+    }
+    return true;
+  }
+}
+// apps/api-core/src/common/guards/tenant.guard.ts
+
+import {
+  CanActivate,
+  ExecutionContext,
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { TenantsService } from '../../modules/tenants/tenants.service';
+
+@Injectable()
+export class TenantGuard implements CanActivate {
+  constructor(private readonly tenantsService: TenantsService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest();
+    const tenantIdHeader = (req.headers['x-tenant-id'] as string)?.trim() || 'default';
+    const user = req.user; // Inyectado por JwtStrategy
+
+    // 1) Verificar que el tenant “exista” (stub devuelve true siempre)
+    const existsTenant = await this.tenantsService.findById(tenantIdHeader);
+    if (!existsTenant) {
+      throw new UnauthorizedException(`Tenant "${tenantIdHeader}" no existe.`);
+    }
+
+    // 2) Verificar que el usuario pertenezca a ese tenant (payload JWT)
+    if (user.tenantId !== tenantIdHeader) {
+      throw new UnauthorizedException('No puedes operar en otro tenant.');
+    }
+
+    return true;
+  }
+}
+// apps/api-core/src/common/logging/logger.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { WinstonModule } from 'nest-winston';
+import * as winston from 'winston';
+import 'winston-mongodb';
+
+@Injectable()
+export class LoggerService {
+  // Este campo es la instancia real de Winston
+  public readonly logger: winston.Logger;
+  
+  constructor(
+    private readonly configService: ConfigService,
+  ) {
+    // Ahora usamos WinstonModule de nest-winston para crear el logger
+    const { createLogger, transports, format } = require('winston');
+    require('winston-mongodb');
+    
+    this.logger = createLogger({
+      level: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+      transports: [
+        // Consola
+        new transports.Console({
+          format: format.combine(
+            format.timestamp(),
+            format.prettyPrint(),
+          ),
+        }),
+        // Archivo
+        new transports.File({
+          filename: 'logs/app.log',
+          level: 'info',
+          format: format.combine(
+            format.timestamp(),
+            format.json(),
+          ),
+        }),
+        // MongoDB: ahora con mongoUrl en lugar de db
+        new winston.transports.MongoDB({
+          db: this.configService.get<string>('MONGO_URI')!,
+          options: { useUnifiedTopology: true },
+          collection: 'application_logs',
+          level: 'warn',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.json(),
+          ),
+        }),
+      ],
+      exitOnError: false,
+    });
+    
+  }
+  
+  info(message: string, meta?: any) {
+    this.logger.info(message, meta);
+  }
+  warn(message: string, meta?: any) {
+    this.logger.warn(message, meta);
+  }
+  error(message: string, trace?: string, meta?: any) {
+    this.logger.error(message, { trace, ...meta });
+  }
+  debug(message: string, meta?: any) {
+    this.logger.debug(message, meta);
+  }
+}
+// apps/api-core/src/common/logging/logging.module.ts
+
+import { Global, Module } from '@nestjs/common';
+import { LoggerService } from './logger.service';
+
+@Global()
+@Module({
+  providers: [LoggerService],
+  exports: [LoggerService],
+})
+export class LoggingModule {}
+// apps/api-core/src/common/mailer/mailer.module.ts
+
+import { Global, Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import { MailerService } from './mailer.service';
+
+@Global()
+@Module({
+  imports: [ConfigModule],
+  providers: [MailerService],
+  exports: [MailerService],
+})
+export class MailerModule {}
+// apps/api-core/src/common/mailer/mailer.service.ts
+
+import { Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import * as nodemailer from 'nodemailer';
+import { SESClient, SendRawEmailCommand } from '@aws-sdk/client-ses';
+import * as ejs from 'ejs';
+import { readFile } from 'fs/promises';
+import { join } from 'path';
+
+@Injectable()
+export class MailerService {
+  private transporter: nodemailer.Transporter | undefined;
+  private readonly logger = new Logger(MailerService.name);
+  private useSES: boolean;
+
+  constructor(private readonly configService: ConfigService) {
+    // Elegir entre SMTP o AWS SES según variable de entorno
+    this.useSES = configService.get<string>('MAIL_PROVIDER') === 'ses';
+
+    if (this.useSES) {
+      // Configuración de AWS SES
+      const region = configService.get<string>('AWS_REGION');
+      const accessKeyId = configService.get<string>('AWS_ACCESS_KEY_ID');
+      const secretAccessKey = configService.get<string>('AWS_SECRET_ACCESS_KEY');
+
+      // No usamos nodemailer en este caso, sino el SDK de AWS
+      this.transporter = undefined;
+    } else {
+      // Configuración SMTP con nodemailer
+      const host = configService.get<string>('SMTP_HOST');
+      const port = configService.get<number>('SMTP_PORT');
+      const user = configService.get<string>('SMTP_USER');
+      const pass = configService.get<string>('SMTP_PASS');
+
+      this.transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure: port === 465, // true para 465, false para otros
+        auth: { user, pass },
+      });
+    }
+  }
+
+  private async renderTemplate(
+    templateName: string,
+    context: Record<string, any>,
+  ): Promise<string> {
+    const filePath = join(__dirname, '../../mail-templates', `${templateName}.ejs`);
+    const templateStr = await readFile(filePath, 'utf-8');
+    return ejs.render(templateStr, context);
+  }
+
+  /**
+   * Envío genérico de correo.
+   */
+  private async sendMail(
+    to: string,
+    subject: string,
+    html: string,
+  ): Promise<void> {
+    if (this.useSES) {
+      // Enviar con AWS SES
+      const sesClient = new SESClient({ region: this.configService.get<string>('AWS_REGION') });
+      const rawMessage = [
+        `From: ${this.configService.get<string>('SES_FROM_EMAIL')}`,
+        `To: ${to}`,
+        `Subject: ${subject}`,
+        'MIME-Version: 1.0',
+        'Content-Type: text/html; charset=UTF-8',
+        '',
+        html,
+      ].join('\n');
+
+      const command = new SendRawEmailCommand({
+        RawMessage: { Data: Buffer.from(rawMessage) },
+      });
+      try {
+        await sesClient.send(command);
+      } catch (err) {
+        this.logger.error(`Error enviando correo SES a ${to}`, err);
+        throw new InternalServerErrorException('Error al enviar correo (SES).');
+      }
+    } else {
+      // Enviar con SMTP/Nodemailer
+      try {
+        if (!this.transporter) {
+          throw new InternalServerErrorException('SMTP transporter is not configured.');
+        }
+        await this.transporter.sendMail({
+          from: this.configService.get<string>('SMTP_FROM_EMAIL'),
+          to,
+          subject,
+          html,
+        });
+      } catch (err) {
+        this.logger.error(`Error enviando correo SMTP a ${to}`, err);
+        throw new InternalServerErrorException('Error al enviar correo (SMTP).');
+      }
+    }
+  }
+
+  /**
+   * Enviar correo de verificación de cuenta.
+   */
+  async sendVerificationEmail(
+    tenantId: string,
+    toEmail: string,
+    name: string,
+    token: string,
+  ): Promise<void> {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+    const verificationLink = `${frontendUrl}/verify-email?token=${token}&tenant=${tenantId}`;
+
+    const html = await this.renderTemplate('verify-account', {
+      name,
+      verificationLink,
+    });
+
+    await this.sendMail(toEmail, 'Verifica tu cuenta en WiduFactory', html);
+  }
+
+  /**
+   * Enviar correo de restablecimiento de contraseña.
+   */
+  async sendPasswordResetEmail(
+    tenantId: string,
+    toEmail: string,
+    name: string,
+    token: string,
+  ): Promise<void> {
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL');
+    const resetLink = `${frontendUrl}/reset-password?token=${token}&tenant=${tenantId}`;
+
+    const html = await this.renderTemplate('reset-password', {
+      name,
+      resetLink,
+    });
+
+    await this.sendMail(toEmail, 'Restablece tu contraseña en WiduFactory', html);
+  }
+
+  /**
+   * Notificación de cambio de rol.
+   */
+  async sendRoleChangeNotice(
+    tenantId: string,
+    toEmail: string,
+    name: string,
+    newRole: string,
+  ): Promise<void> {
+    const html = await this.renderTemplate('role-changed', {
+      name,
+      newRole,
+    });
+    await this.sendMail(toEmail, 'Tu rol ha cambiado en WiduFactory', html);
+  }
+}
+import { Injectable, NestMiddleware } from '@nestjs/common';
+import { Response, NextFunction } from 'express';
+import { Request as ExpressRequest } from 'express';
+
+interface AuthenticatedRequest extends ExpressRequest {
+  user?: {
+    sub: string;
+    email: string;
+    role: string;
+    tenant: string;
+    [key: string]: any;
+  };
+  tenant?: string;
+}
+
+@Injectable()
+export class TenantMiddleware implements NestMiddleware {
+  use(req: AuthenticatedRequest, res: Response, next: NextFunction) {
+    if (req.user?.tenant) {
+      req.tenant = req.user.tenant;
+    } else {
+      req.tenant = 'default';
+    }
+    next();
+  }
+}
+// apps/api-core/src/common/seeder/seeder.module.ts
+
+import { Global, Module } from '@nestjs/common';
+import { SeederService } from './seeder.service';
+import { TenantsModule } from '../../modules/tenants/tenants.module';
+import { RolesModule } from '../../modules/roles/roles.module';
+import { PlansModule } from '../../modules/plans/plans.module';
+
+@Global()
+@Module({
+  imports: [TenantsModule, RolesModule, PlansModule],
+  providers: [SeederService],
+  exports: [SeederService],
+})
+export class SeederModule {}
+// apps/api-core/src/common/seeder/seeder.service.ts
+
+import { Injectable, Logger } from '@nestjs/common';
+import { TenantsService } from '../../modules/tenants/tenants.service';
+import { RolesService } from '../../modules/roles/roles.service';
+import { PlansService } from '../../modules/plans/plans.service';
+
+@Injectable()
+export class SeederService {
+  private readonly logger = new Logger(SeederService.name);
+
+  constructor(
+    private readonly tenantsService: TenantsService,
+    private readonly rolesService: RolesService,
+    private readonly plansService: PlansService,
+  ) {}
+
+  /**
+   * Verifica y crea (si es necesario) los registros por defecto:
+   * - Tenant “default”
+   * - Plan “free”
+   * - Rol “user” (sin descripción ni asignación de plan)
+   */
+  async seed() {
+    // 1) Tenant por defecto
+    const defaultTenantId = 'default';
+    const tenantExists = await this.tenantsService.findById(defaultTenantId);
+    if (!tenantExists) {
+      try {
+        // Ahora pasamos { tenantId, name }
+        await this.tenantsService.create({
+          tenantId: defaultTenantId,
+          name: 'Tenant Default',
+        });
+        this.logger.log(`Tenant "${defaultTenantId}" creado`);
+      } catch (err) {
+        this.logger.error(`Error creando tenant "${defaultTenantId}":`, err);
+      }
+    } else {
+      this.logger.log(`Tenant "${defaultTenantId}" ya existe`);
+    }
+
+    // 2) Plan “free” por defecto (usando findByName de PlansService)
+    const freePlanName = 'free';
+    let freePlan = await this.plansService.findByName(defaultTenantId, freePlanName);
+    if (!freePlan) {
+      try {
+        freePlan = await this.plansService.create(defaultTenantId, {
+          name: freePlanName,
+          price: 0,
+          features: [],
+          defaultRoles: [],
+        });
+        this.logger.log(
+          `Plan "${freePlanName}" creado para tenant "${defaultTenantId}"`,
+        );
+      } catch (err) {
+        this.logger.error(`Error creando plan "${freePlanName}":`, err);
+      }
+    } else {
+      this.logger.log(`Plan "${freePlanName}" ya existe`);
+    }
+
+    // 3) Rol “user” por defecto
+    const userRoleName = 'user';
+    let userRole = await this.rolesService.findByName(defaultTenantId, userRoleName);
+    if (!userRole) {
+      try {
+        userRole = await this.rolesService.create(defaultTenantId, {
+          name: userRoleName,
+          permissions: [],
+        });
+        this.logger.log(`Rol "${userRoleName}" creado en tenant "${defaultTenantId}"`);
+      } catch (err) {
+        this.logger.error(`Error creando rol "${userRoleName}":`, err);
+      }
+    } else {
+      this.logger.log(`Rol "${userRoleName}" ya existe`);
+    }
+
+    this.logger.log('Seed inicial completado');
+  }
+}
+// apps/api-core/src/main.ts
+
+import * as dotenv from 'dotenv';
+import * as path from 'path';
+dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
+
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { AppModule } from './app.module';
+import { NestFactory } from '@nestjs/core';
+import { TenantMiddleware } from './common/middlewares/tenant.middleware';
+import { GlobalHttpExceptionFilter } from './common/filters/http-exception.filter';
+import { SeederService } from './common/seeder/seeder.service';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  
+  
+  // Ejecutar seed antes de arrancar listeners
+  const seeder = app.get(SeederService);
+  try {
+    await seeder.seed();
+  } catch (err) {
+    // Si falla el seed, lo registramos pero seguimos con arranque
+    console.error('Error durante seed inicial:', err);
+  }
+  
+  
+  // Middleware global para tenant
+  app.use(new TenantMiddleware().use);
+  
+  // Swagger / OpenAPI
+  const config = new DocumentBuilder()
+  .setTitle('Widu Factory API')
+  .setDescription('API Core de Widu Factory (Multi-tenant, HACL, Auth)')
+  .setVersion('1.0')
+  .addBearerAuth(
+    { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+    'Authorization',
+  )
+  .addApiKey(
+    { type: 'apiKey', name: 'x-tenant-id', in: 'header', description: 'Tenant ID header' },
+    'TenantId',
+  )
+  .build();
+  
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('docs', app, document);
+  
+  app.useGlobalFilters(new GlobalHttpExceptionFilter());  // 👈
+  
+  await app.listen(3000);
+  
+  console.log('🚀 API corriendo en http://0.0.0.0:3000');
+}
+
+bootstrap();
+// apps/api-core/src/modules/auth/auth.controller.ts
+
+import {
+  Body,
+  Controller,
+  Post,
+  UseGuards,
+  Request,
+  Get,
+  Headers,
+  UnauthorizedException,
+  BadRequestException,
+} from '@nestjs/common';
+import { AuthService } from './auth.service';
+import { LoginDto } from './dto/login.dto';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+
+// Guard Local para login
+import { AuthGuard } from '@nestjs/passport';
+import { JwtAuthGuard } from './jwt-auth.guard';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+import { UsersService } from '../users/users.service';
+import { MailerService } from '../../common/mailer/mailer.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { randomBytes, scrypt as scryptCallback } from 'crypto';
+import { promisify } from 'util';
+const scrypt = promisify(scryptCallback);
+// Guard JWT para proteger rutas
+
+@Controller('auth')
+export class AuthController {
+  constructor(
+    private readonly authService: AuthService,
+    private readonly mailerService: MailerService,
+    private readonly usersService: UsersService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  /**
+   * Endpoint POST /auth/login
+   * Body: { email, password }
+   * Header: x-tenant-id (opcional)
+   * Devuelve: { access_token: string }
+   */
+  @UseGuards(AuthGuard('local'))
+  @Post('login')
+  // @Throttle(5, 60) // máximo 5 intentos de login por IP+user en 60 segundos
+  async login(
+    @Request() req: any,           // Aquí Passport ya colocó req.user = user (del LocalStrategy)
+    @Headers('x-tenant-id') tenantIdHeader: string,
+  ) {
+    // req.user contiene { _id, email, tenantId, roles, ... } (sin passwordHash)
+    const user = req.user;
+    // Confirmamos / ajustamos tenantId al que venga en header o default
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    if (tenantId !== user.tenantId) {
+      // Si el tenant en el token no coincide con el header, rechazamos
+      throw new UnauthorizedException('Tenant inválido');
+    }
+    // Generar JWT
+    return this.authService.login(user, req);
+  }
+
+  /**
+   * Ejemplo de endpoint protegido con JWT: GET /auth/profile
+   * El guard JwtAuthGuard valida el token y inyecta req.user = { userId, tenantId, roles }.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('profile')
+  getProfile(@Request() req: any) {
+    return {
+      msg: 'Aquí va la información del perfil',
+      user: req.user,
+    };
+  }
+
+  
+  /**
+   * GET /auth/me
+   * Devuelve { userId, tenantId, roles, permissions, email }
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  getMe(@Request() req: any) {
+    const user = req.user;
+    return {
+      userId: user.userId,
+      tenantId: user.tenantId,
+      roles: user.roles,
+      permissions: user.permissions,
+      email: user.email,
+    };
+  }
+
+    /**
+   * POST /auth/forgot-password
+   * Recibe { email } y genera token si existe el usuario. Luego envía email.
+   */
+  @Post('forgot-password')
+  async forgotPassword(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Body() dto: ForgotPasswordDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    // 1) Buscar usuario por email
+    const user = await this.usersService.findByEmail(tenantId, dto.email);
+    if (!user) {
+      // No informar que no existe; para no filtrar emails
+      return { success: true, message: 'Si tu email existe, recibirás un correo.' };
+    }
+    // 2) Generar token JWT corto para reset
+    const payload = {
+      sub: user._id.toString(),
+      tenantId: user.tenantId,
+      email: user.email,
+    };
+    const expiresIn = this.configService.get<string>('RESET_TOKEN_EXPIRES_IN') || '1h';
+    const resetToken = this.jwtService.sign(payload, {
+      secret: this.configService.get<string>('JWT_SECRET'),
+      expiresIn,
+    });
+
+    // 3) Enviar correo de reset
+    await this.mailerService.sendPasswordResetEmail(
+      tenantId,
+      user.email,
+      user.metadata?.name || user.email,
+      resetToken,
+    );
+
+    return { success: true, message: 'Si tu email existe, recibirás un correo.' };
+  }
+
+  /**
+   * POST /auth/reset-password
+   * Recibe { token, newPassword }.
+   */
+  @Post('reset-password')
+  async resetPassword(
+    @Body() dto: ResetPasswordDto,
+  ) {
+    // 1) Verificar token
+    let payload: any;
+    try {
+      payload = this.jwtService.verify(dto.token, {
+        secret: this.configService.get<string>('JWT_SECRET'),
+      });
+    } catch (err) {
+      throw new BadRequestException('Token inválido o expirado.');
+    }
+    const tenantId = payload.tenantId;
+    const userId = payload.sub;
+
+    // 2) Actualizar contraseña
+    const salt = randomBytes(8).toString('hex');
+    const derivedKey = (await scrypt(dto.newPassword, salt, 64)) as Buffer;
+    const passwordHash = `${salt}:${derivedKey.toString('hex')}`;
+
+    await this.usersService.updatePassword(tenantId, userId, passwordHash);
+
+    return { success: true, message: 'Contraseña actualizada correctamente.' };
+  }
+}
+// apps/api-core/src/modules/auth/auth.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
+import { JwtModule } from '@nestjs/jwt';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+
+import { AuthService } from './auth.service';
+import { AuthController } from './auth.controller';
+import { LocalStrategy } from './local.strategy';
+import { JwtStrategy } from './jwt.strategy';
+import { JwtAuthGuard } from './jwt-auth.guard';
+
+// Importamos los módulos que proporcionan UsersService y RolesService
+import { UsersModule } from '../users/users.module';
+import { RolesModule } from '../roles/roles.module';
+import { SessionModule } from '../sessions/session.module';
+
+@Module({
+  imports: [
+    PassportModule.register({ defaultStrategy: 'jwt' }),
+
+    // JwtModule se registra con el secret y expiresIn del ConfigService
+    JwtModule.registerAsync({
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => {
+        const jwtSecret = configService.get<string>('JWT_SECRET');
+        if (!jwtSecret) {
+          throw new Error('JWT_SECRET no está definido en variables de entorno');
+        }
+        return {
+          secret: jwtSecret,
+          signOptions: { expiresIn: configService.get<string>('JWT_EXPIRES_IN') || '3600s' },
+        };
+      },
+      inject: [ConfigService],
+    }),
+
+    // Aseguramos que UsersModule y RolesModule estén disponibles
+    forwardRef(() => UsersModule),
+    forwardRef(() => RolesModule),
+    forwardRef(() => SessionModule), // ← aquí agregamos SessionModule
+  ],
+  providers: [
+    AuthService,
+    LocalStrategy,
+    JwtStrategy,
+    JwtAuthGuard,
+  ],
+  controllers: [AuthController],
+  exports: [AuthService, JwtAuthGuard],
+})
+export class AuthModule {}
+// apps/api-core/src/modules/auth/auth.service.ts
+
+import { forwardRef, Inject, Injectable, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { UsersService } from '../users/users.service';
+
+// Inyectamos ConfigService para leer JWT_SECRET y JWT_EXPIRES_IN
+import { ConfigService } from '@nestjs/config';
+
+// Usamos scrypt (igual que en UsersService) para verificar la contraseña
+import { randomBytes, scrypt as _scrypt, timingSafeEqual } from 'crypto';
+import { promisify } from 'util';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Role } from '../roles/schemas/role.schema';
+import { PermissionsService } from '../permissions/permissions.service';
+import { RolesService } from '../roles/roles.service';
+import { SessionService } from '../sessions/session.service';
+
+const scrypt = promisify(_scrypt);
+
+@Injectable()
+export class AuthService {
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly rolesService: RolesService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+    private readonly sessionService: SessionService
+  ) {}
+  
+  /**
+  * Validar credenciales de un usuario (tenantId, email, password).
+  * @returns El objeto user (sin passwordHash) si es válido, o lanza UnauthorizedException.
+  */
+  async validateUser(
+    tenantId: string,
+    email: string,
+    password: string,
+  ): Promise<any> {
+    // 1) Obtener usuario con tenantId+email
+    const user = await this.usersService.findByEmail(tenantId, email);
+    if (!user) {
+      throw new UnauthorizedException('Credenciales inválidas (email).');
+    }
+    
+    // 2) user.passwordHash está guardado como "salt:hashHex"
+    if (!user.passwordHash) {
+      throw new UnauthorizedException('Credenciales inválidas (password hash no encontrado).');
+    }
+    const [salt, storedHashHex] = user.passwordHash.split(':');
+    const derivedKey = (await scrypt(password, salt, 64)) as Buffer;
+    const derivedKeyHex = derivedKey.toString('hex');
+    
+    // 3) Comparamos usando timingSafeEqual para evitar ataques de tiempo
+    const storedHashBuf = Buffer.from(storedHashHex, 'hex');
+    const derivedBuf = Buffer.from(derivedKeyHex, 'hex');
+    
+    // Si los buffers tienen distinto largo, directament reject
+    if (storedHashBuf.length !== derivedBuf.length) {
+      throw new UnauthorizedException('Credenciales inválidas (password).');
+    }
+    if (!timingSafeEqual(storedHashBuf, derivedBuf)) {
+      throw new UnauthorizedException('Credenciales inválidas (password).');
+    }
+    
+    // 4) Si llegamos acá, las credenciales son válidas. Retornamos user sin passwordHash.
+    const { passwordHash, ...result } = user.toObject();
+    return result;
+  }
+  
+  /**
+  * Genera un JWT válido para este usuario.
+  * El payload incluirá:
+  *  - sub: userId (string)
+  *  - tenantId: tenant actual
+  *  - roles: array de roles (IDs o nombres), según prefieras.
+  * Modificamos para:
+  * - Obtener roles y permissions asociados al usuario
+  * - Incluir ambos arrays en el payload
+  */
+  async login(user: any, req?: any): Promise<{ access_token: string }> {
+    
+    // 1) crear sesión en DB
+    const ipAddress = req?.ip || 'unknown';
+    const userAgent = req?.headers['user-agent'] || '';
+    const session = await this.sessionService.createSession(
+      user.userId,
+      user.tenantId,
+      ipAddress,
+      userAgent,
+    );
+    
+    // 1) user.roles es array de ObjectId (string)
+    const roleIds: string[] = user.roles.map((r: any) => r.toString());
+    
+    // 2) Obtener permisos únicos para esos roles
+    const permissions: string[] = await this.rolesService.getPermissionsForRoles(
+      user.tenantId,
+      roleIds,
+    );
+    
+    // 3) Payload con sub, tenantId, roles y permisos
+    const payload = {
+      sub: user._id.toString(),
+      tenantId: user.tenantId,
+      roles: roleIds,
+      permissions: permissions,
+      sessionId: session.sessionId,
+      email: user.email,
+    };
+    
+    const token = this.jwtService.sign(payload);
+    return {
+      access_token: token,
+    };
+  }
+}
+// apps/api-core/src/modules/auth/dto/forgot-password.dto.ts
+import { IsEmail } from 'class-validator';
+
+export class ForgotPasswordDto {
+  @IsEmail()
+  email!: string;
+}
+// apps/api-core/src/modules/auth/dto/login.dto.ts
+
+import { IsEmail, IsNotEmpty, IsString } from 'class-validator';
+
+export class LoginDto {
+  @IsEmail()
+  readonly email!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  readonly password!: string;
+}
+// apps/api-core/src/modules/auth/dto/reset-password.dto.ts
+import { IsString, MinLength } from 'class-validator';
+
+export class ResetPasswordDto {
+  @IsString()
+  token!: string;
+
+  @IsString()
+  @MinLength(8)
+  newPassword!: string;
+}
+// apps/api-core/src/modules/auth/jwt-auth.guard.ts
+
+import { Injectable } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+
+/**
+ * Guard para rutas protegidas con JWT.
+ * Usa la strategy definida en JwtStrategy.
+ */
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {}
+// apps/api-core/src/modules/auth/jwt.strategy.ts
+
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy, ExtractJwt, StrategyOptions } from 'passport-jwt';
+import { ConfigService } from '@nestjs/config';
+
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+    constructor(private readonly configService: ConfigService) {
+        const jwtSecret = configService.get<string>('JWT_SECRET');
+        if (!jwtSecret) {
+            throw new UnauthorizedException('JWT_SECRET no está definido en variables de entorno');
+        }
+        const options: StrategyOptions = {
+            jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+            secretOrKey: jwtSecret,       // ahora es “string” seguro
+            ignoreExpiration: false,
+        };
+        super(options);
+    }
+    
+    /**
+    * Después de verificar la firma, Passport llama a validate() con el payload decodificado.
+    * Aquí retornamos un objeto “user” que se inyectará en request.user.
+    */
+    async validate(payload: any) {
+        // payload: { sub: <userId>, tenantId: <string>, roles: [...], iat, exp }
+        return {
+            userId: payload.sub,
+            tenantId: payload.tenantId,
+            roles: payload.roles,
+        };
+    }
+}
+// apps/api-core/src/modules/auth/local.strategy.ts
+
+import { Strategy } from 'passport-local';
+import { PassportStrategy } from '@nestjs/passport';
+import {
+  Injectable,
+  UnauthorizedException,
+  BadRequestException,
+} from '@nestjs/common';
+import { Request } from 'express';
+import { AuthService } from './auth.service';
+
+@Injectable()
+export class LocalStrategy extends PassportStrategy(Strategy) {
+  constructor(private authService: AuthService) {
+    super({
+      usernameField: 'email',         // el campo que viene en el body para “username”
+      passwordField: 'password',      // el campo para la contraseña
+      passReqToCallback: true,        // para obtener tenantId del request
+    });
+  }
+
+  /**
+   * Esta función se dispara cuando usamos @UseGuards(AuthGuard('local'))
+   * Espera que el body tenga { email, password } y también lee headers.
+   * Si validación falla, lanza UnauthorizedException.
+   */
+  async validate(
+    req: Request,
+    email: string,
+    password: string,
+  ): Promise<any> {
+    // 1) Extraer tenantId del header. Si no viene, usamos "default"
+    const tenantIdRaw = req.headers['x-tenant-id'] as string;
+    if (!tenantIdRaw) {
+      // Podrías querer lanzar BadRequestException si el tenant es obligatorio
+      // Para este ejemplo, asignamos "default" cuando falta
+      // throw new BadRequestException('Falta header x-tenant-id');
+    }
+    const tenantId = tenantIdRaw?.trim() || 'default';
+
+    // 2) Validar credenciales
+    const user = await this.authService.validateUser(tenantId, email, password);
+    if (!user) {
+      throw new UnauthorizedException('Credenciales inválidas');
+    }
+    // 3) Si todo OK, retornamos user. Passport guard lo expondrá en request.user
+    return user;
+  }
+}
+// apps/api-core/src/modules/files/file.controller.ts
+
+import {
+  Controller,
+  Post,
+  UseGuards,
+  UploadedFile,
+  UseInterceptors,
+  Headers,
+  Request,
+  Get,
+  Param,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
+import { FileService } from './file.service';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { FileInterceptor } from '@nestjs/platform-express';
+import * as multer from 'multer';
+
+@Controller('files')
+export class FileController {
+  constructor(private readonly fileService: FileService) {}
+
+  /**
+   * POST /files/upload
+   * Recibe multipart/form-data con campo “file”.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Post('upload')
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadFile(
+    @Request() req: any,
+    @UploadedFile() file: Express.Multer.File,
+    @Headers('x-tenant-id') tenantIdHeader: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    const userId = req.user.userId;
+    if (!file) {
+      throw new BadRequestException('No se envió ningún archivo.');
+    }
+    return await this.fileService.uploadFile(
+      tenantId,
+      userId,
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+    );
+  }
+
+  /**
+   * GET /files/:id
+   * Devuelve una URL pre-signed para descargar.
+   */
+  @UseGuards(JwtAuthGuard)
+  @Get(':id')
+  async getFileUrl(
+    @Request() req: any,
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.fileService.getPresignedUrl(id, tenantId);
+  }
+}
+// apps/api-core/src/modules/files/file.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { FileMeta, FileMetaSchema } from './schemas/file.schema';
+import { FileService } from './file.service';
+import { FileController } from './file.controller';
+import { AuthModule } from '../auth/auth.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: FileMeta.name, schema: FileMetaSchema }]),
+    forwardRef(() => AuthModule), // Para proteger rutas con JwtAuthGuard
+  ],
+  providers: [FileService],
+  controllers: [FileController],
+})
+export class FileModule {}
+// apps/api-core/src/modules/files/file.service.ts
+
+import { Injectable, InternalServerErrorException, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { FileMeta } from './schemas/file.schema';
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { ConfigService } from '@nestjs/config';
+import { v4 as uuidv4 } from 'uuid';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+@Injectable()
+export class FileService {
+  private s3Client: S3Client;
+  private bucketName: string;
+  
+  constructor(
+    @InjectModel(FileMeta.name) private readonly fileMetaModel: Model<FileMeta>,
+    private readonly configService: ConfigService,
+  ) {
+    this.bucketName = this.configService.get<string>('S3_BUCKET_NAME')!;
+    this.s3Client = new S3Client({
+      region: this.configService.get<string>('AWS_REGION')!,
+      credentials: {
+        accessKeyId: this.configService.get<string>('AWS_ACCESS_KEY_ID')!,
+        secretAccessKey: this.configService.get<string>('AWS_SECRET_ACCESS_KEY')!,
+      },
+    });
+    
+    
+  }
+  
+  /**
+  * Sube el buffer recibido a S3 bajo un key generado.
+  */
+  async uploadFile(
+    tenantId: string,
+    userId: string,
+    fileBuffer: Buffer,
+    originalName: string,
+    mimeType: string,
+  ): Promise<FileMeta> {
+    const extension = originalName.split('.').pop();
+    const fileId = uuidv4();
+    const bucketKey = `${tenantId}/${userId}/${fileId}.${extension}`;
+    
+    // 1) subir a S3
+    const putCommand = new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: bucketKey,
+      Body: fileBuffer,
+      ContentType: mimeType,
+    });
+    try {
+      await this.s3Client.send(putCommand);
+    } catch (err) {
+      throw new InternalServerErrorException('Error subiendo archivo a S3.');
+    }
+    
+    // 2) Generar URL pre-signed (válida 1 hora)
+    const getCommand = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: bucketKey,
+    });
+    const url = await getSignedUrl(this.s3Client, getCommand, { expiresIn: 3600 });
+    
+    // 3) Guardar metadata en Mongo
+    const newMeta = new this.fileMetaModel({
+      tenantId,
+      userId,
+      bucketKey,
+      url,
+      contentType: mimeType,
+    });
+    return await newMeta.save();
+  }
+  
+  /**
+  * Generar una nueva URL pre-signed (por si expira la anterior).
+  */
+  async getPresignedUrl(id: string, tenantId: string): Promise<string> {
+    const meta = await this.fileMetaModel.findOne({ _id: id, tenantId }).exec();
+    if (!meta) {
+      throw new NotFoundException('Archivo no encontrado');
+    }
+    const getCommand = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: meta.bucketKey,
+    });
+    return await getSignedUrl(this.s3Client, getCommand, { expiresIn: 3600 });
+  }
+}
+// apps/api-core/src/modules/files/schemas/file.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class FileMeta extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  userId!: string;
+
+  @Prop({ required: true })
+  bucketKey!: string; // e.g. 'tenant/user/uuid.jpg'
+
+  @Prop({ required: true })
+  url!: string; // URL pública o pre-signed
+
+  @Prop({ required: true })
+  contentType!: string;
+}
+
+export const FileMetaSchema = SchemaFactory.createForClass(FileMeta);
+// apps/api-core/src/modules/health/health.controller.ts
+
+import { Controller, Get } from '@nestjs/common';
+
+@Controller('health')
+export class HealthController {
+  @Get()
+  getHealth() {
+    return {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+    };
+  }
+}
+// apps/api-core/src/modules/health/health.module.ts
+
+import { Module } from '@nestjs/common';
+import { HealthController } from './health.controller';
+
+@Module({
+  controllers: [HealthController],
+})
+export class HealthModule {}
+// apps/api-core/src/modules/permissions/dto/create-permission.dto.ts
+
+import { IsNotEmpty, IsString, IsOptional } from 'class-validator';
+
+export class CreatePermissionDto {
+  @IsString()
+  @IsNotEmpty()
+  readonly name!: string;
+
+  @IsOptional()
+  @IsString()
+  readonly description?: string;
+}
+// apps/api-core/src/modules/permissions/dto/update-permission.dto.ts
+
+import { IsOptional, IsString } from 'class-validator';
+
+export class UpdatePermissionDto {
+  @IsOptional()
+  @IsString()
+  readonly name?: string;
+
+  @IsOptional()
+  @IsString()
+  readonly description?: string;
+}
+// apps/api-core/src/modules/permissions/permissions.controller.ts
+
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  HttpCode,
+  HttpStatus,
+  Headers,
+  Query,
+  ParseIntPipe
+} from '@nestjs/common';
+import { PermissionsService } from './permissions.service';
+import { CreatePermissionDto } from './dto/create-permission.dto';
+import { UpdatePermissionDto } from './dto/update-permission.dto';
+
+@Controller('permissions')
+export class PermissionsController {
+  constructor(private readonly permissionsService: PermissionsService) {}
+
+  /**
+   * Crear un nuevo permiso en este tenant.
+   */
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Body() createDto: CreatePermissionDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.permissionsService.create(tenantId, createDto);
+  }
+
+  /**
+   * Listar todos los permisos en este tenant.
+   */
+  @Get()
+  async findAll(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Query('search') search?: string,
+    @Query('page', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) page = 1,
+    @Query('limit', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) limit = 10,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.permissionsService.findAll(tenantId, search, page, limit);
+  }
+  /**
+   * Obtener un permiso por ID (en este tenant).
+   */
+  @Get(':id')
+  async findOne(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.permissionsService.findOne(tenantId, id);
+  }
+
+  /**
+   * Actualizar un permiso (renombrar o cambiar descripción).
+   */
+  @Patch(':id')
+  async update(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body() updateDto: UpdatePermissionDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.permissionsService.update(tenantId, id, updateDto);
+  }
+
+  /**
+   * Borrar un permiso (hard delete) en este tenant.
+   */
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.permissionsService.remove(tenantId, id);
+  }
+}
+// apps/api-core/src/modules/permissions/permissions.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+import { Permission, PermissionSchema } from './schemas/permission.schema';
+import { PermissionsService } from './permissions.service';
+import { PermissionsController } from './permissions.controller';
+import { RolesModule } from '../roles/roles.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Permission.name, schema: PermissionSchema }]),
+    forwardRef(() => RolesModule),
+  ],
+  providers: [PermissionsService],
+  controllers: [PermissionsController],
+  exports: [PermissionsService],
+})
+export class PermissionsModule {}
+// apps/api-core/src/modules/permissions/permissions.service.ts
+
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  forwardRef,
+  Inject,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+
+import { Permission } from './schemas/permission.schema';
+import { CreatePermissionDto } from './dto/create-permission.dto';
+import { UpdatePermissionDto } from './dto/update-permission.dto';
+
+// Inyectamos RolesService para sincronizar borrado/renombrado
+import { RolesService } from '../roles/roles.service';
+
+@Injectable()
+export class PermissionsService {
+  constructor(
+    @InjectModel(Permission.name) private readonly permissionModel: Model<Permission>,
+    @Inject(forwardRef(() => RolesService))
+    private readonly rolesService: RolesService,
+  ) {}
+
+  /**
+   * Crear un permiso en un tenant dado.
+   */
+  async create(
+    tenantId: string,
+    createDto: CreatePermissionDto,
+  ): Promise<Permission> {
+    const { name, description } = createDto;
+
+    // 1) Verificar duplicado en este tenant
+    const exist = await this.permissionModel
+      .findOne({ tenantId, name })
+      .exec();
+    if (exist) {
+      throw new ConflictException(`El permiso "${name}" ya existe en este tenant.`);
+    }
+
+    const created = new this.permissionModel({ tenantId, name, description });
+    return await created.save();
+  }
+
+  /**
+   * Listar permisos de este tenant.
+   */
+  async findAll(
+    tenantId: string,
+    searchTerm?: string,
+    page = 1,
+    limit = 10,
+  ): Promise<{ data: Permission[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const filter: any = { tenantId };
+    if (searchTerm && searchTerm.trim() !== '') {
+      filter.name = { $regex: searchTerm, $options: 'i' };
+    }
+    const [data, total] = await Promise.all([
+      this.permissionModel
+        .find(filter)
+        .skip(skip)
+        .limit(limit)
+        .exec(),
+      this.permissionModel.countDocuments(filter).exec(),
+    ]);
+    return { data, total };
+  }
+
+  /**
+   * Obtener un permiso por ID en este tenant.
+   */
+  async findOne(tenantId: string, id: string): Promise<Permission> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
+    const perm = await this.permissionModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!perm) {
+      throw new NotFoundException(`Permiso con ID "${id}" no encontrado en este tenant.`);
+    }
+    return perm;
+  }
+
+  /**
+   * Actualizar un permiso (o renombrarlo).
+   * Si renombramos, verificamos duplicado en este tenant.
+   * Luego, llamamos a RolesService.replacePermissionInRoles para sincronizar,
+   * aunque en este momento es “no-op” (solo placeholder).
+   */
+  async update(
+    tenantId: string,
+    id: string,
+    updateDto: UpdatePermissionDto,
+  ): Promise<Permission> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
+    const perm = await this.permissionModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!perm) {
+      throw new NotFoundException(`Permiso con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    // Si renombramos
+    if (updateDto.name && updateDto.name !== perm.name) {
+      const exist = await this.permissionModel
+        .findOne({ tenantId, name: updateDto.name })
+        .exec();
+      if (exist) {
+        throw new ConflictException(`El permiso "${updateDto.name}" ya existe en este tenant.`);
+      }
+      // 🔄 Sincronizar con RolesService (en este momento no hace nada)
+      await this.rolesService.replacePermissionInRoles(tenantId, id, id);
+      perm.name = updateDto.name;
+    }
+
+    if (updateDto.description !== undefined) {
+      perm.description = updateDto.description;
+    }
+
+    return await perm.save();
+  }
+
+  /**
+   * Eliminar un permiso (hard delete).
+   * Antes de borrar, le pedimos a RolesService que quite ese permiso de todos los roles.
+   */
+  async remove(tenantId: string, id: string): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
+    const perm = await this.permissionModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!perm) {
+      throw new NotFoundException(`Permiso con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    // Primero quitamos referencias en roles
+    await this.rolesService.removePermissionFromAllRoles(tenantId, id);
+    // Luego borramos físicamente
+    await this.permissionModel.deleteOne({ _id: id, tenantId }).exec();
+  }
+
+    /**
+   * Buscar múltiples permisos por su ObjectId (array). Retorna array de Permission.
+   */
+  async findManyByIds(
+    tenantId: string,
+    ids: Types.ObjectId[],
+  ): Promise<Permission[]> {
+    return this.permissionModel
+      .find({ tenantId, _id: { $in: ids } })
+      .exec();
+  }
+}
+// apps/api-core/src/modules/permissions/schemas/permission.schema.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Permission extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  name!: string;
+
+  @Prop({ default: '' })
+  description?: string;
+}
+
+export const PermissionSchema = SchemaFactory.createForClass(Permission);
+
+// Índice compuesto (tenantId, name) con unicidad
+PermissionSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+// apps/api-core/src/modules/plans/dto/create-plan.dto.ts
+
+import {
+  IsNotEmpty,
+  IsString,
+  IsNumber,
+  Min,
+  IsOptional,
+  IsArray,
+  ArrayUnique,
+} from 'class-validator';
+
+export class CreatePlanDto {
+  @IsString()
+  @IsNotEmpty()
+  readonly name!: string;
+
+  @IsNumber()
+  @Min(0)
+  readonly price!: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly features?: string[]; // Características opcionales
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly defaultRoles?: string[]; // IDs de Role que vienen por defecto en este plan
+}
+// apps/api-core/src/modules/plans/dto/update-plan.dto.ts
+
+import {
+  IsOptional,
+  IsNumber,
+  Min,
+  IsArray,
+  ArrayUnique,
+  IsString,
+} from 'class-validator';
+
+export class UpdatePlanDto {
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  readonly price?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly features?: string[];
+
+  @IsOptional()
+  @IsArray()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly defaultRoles?: string[]; // IDs de Role
+}
+// apps/api-core/src/modules/plans/plans.controller.ts
+
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  HttpCode,
+  HttpStatus,
+  Headers,
+  UseGuards,
+  Query,
+  ParseIntPipe,
+} from '@nestjs/common';
+import { PlansService } from './plans.service';
+import { CreatePlanDto } from './dto/create-plan.dto';
+import { UpdatePlanDto } from './dto/update-plan.dto';
+
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { Permissions } from '../../common/decorators/permissions.decorator';
+
+@Controller('plans')
+@UseGuards(JwtAuthGuard, TenantGuard)
+export class PlansController {
+  constructor(private readonly plansService: PlansService) {}
+
+  /**
+   * POST /plans
+   * - Sólo usuarios con permiso 'plans.create'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.create')
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Body() createDto: CreatePlanDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.plansService.create(tenantId, createDto);
+  }
+
+  /**
+   * GET /plans?search=&page=&limit=
+   * - Sólo usuarios con permiso 'plans.read'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.read')
+  @Get()
+  async findAll(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Query('search') search?: string,
+    @Query(
+      'page',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    page = 1,
+    @Query(
+      'limit',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    limit = 10,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.plansService.findAll(tenantId, search, page, limit);
+  }
+
+  /**
+   * GET /plans/:id
+   * - Sólo usuarios con permiso 'plans.read'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.read')
+  @Get(':id')
+  async findOne(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.plansService.findOne(tenantId, id);
+  }
+
+  /**
+   * PATCH /plans/:id
+   * - Sólo usuarios con permiso 'plans.update'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.update')
+  @Patch(':id')
+  async update(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body() updateDto: UpdatePlanDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.plansService.update(tenantId, id, updateDto);
+  }
+
+  /**
+   * DELETE /plans/:id
+   * - Sólo usuarios con permiso 'plans.delete'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('plans.delete')
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.plansService.remove(tenantId, id);
+  }
+}
+// apps/api-core/src/modules/plans/plans.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+import { Plan, PlanSchema } from './schemas/plan.schema';
+import { PlansService } from './plans.service';
+import { PlansController } from './plans.controller';
+import { RolesModule } from '../roles/roles.module';
+
+// Importamos TenantsModule para que TenantGuard (que se aplica en PlansController) encuentre TenantsService
+import { TenantsModule } from '../tenants/tenants.module';
+
+@Module({
+  imports: [
+    // Registro del schema “Plan” en Mongoose
+    MongooseModule.forFeature([{ name: Plan.name, schema: PlanSchema }]),
+    // forwardRef para romper la posible circularidad con RolesModule
+    forwardRef(() => RolesModule),
+    // ← Aquí se añade TenantsModule:
+    TenantsModule,
+  ],
+  providers: [PlansService],
+  controllers: [PlansController],
+  exports: [PlansService],
+})
+export class PlansModule {}
+// apps/api-core/src/modules/plans/plans.service.ts
+
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  forwardRef,
+  Inject,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+
+import { Plan } from './schemas/plan.schema';
+import { CreatePlanDto } from './dto/create-plan.dto';
+import { UpdatePlanDto } from './dto/update-plan.dto';
+import { RolesService } from '../roles/roles.service';
+
+@Injectable()
+export class PlansService {
+  constructor(
+    @InjectModel(Plan.name) private readonly planModel: Model<Plan>,
+    @Inject(forwardRef(() => RolesService))
+    private readonly rolesService: RolesService,
+  ) {}
+
+  /**
+   * Crear un nuevo plan en un tenant.
+   * @param tenantId — Tenant actual.
+   * @param createDto — { name, price, features?, defaultRoles? }
+   */
+  async create(
+    tenantId: string,
+    createDto: CreatePlanDto,
+  ): Promise<Plan> {
+    const { name, price, features = [], defaultRoles = [] } = createDto;
+
+    // 1) Verificar duplicado (tenantId, name)
+    const exist = await this.planModel.findOne({ tenantId, name }).exec();
+    if (exist) {
+      throw new ConflictException(`El plan "${name}" ya existe en este tenant.`);
+    }
+
+    // 2) Validar que cada roleId de defaultRoles exista en este tenant
+    const validRoleIds: Types.ObjectId[] = [];
+    for (const rId of defaultRoles) {
+      if (!Types.ObjectId.isValid(rId)) {
+        throw new BadRequestException(`ID de rol inválido: ${rId}`);
+      }
+      const role = await this.rolesService.findOne(tenantId, rId);
+      if (!role) {
+        throw new BadRequestException(`Rol con ID "${rId}" no existe en este tenant.`);
+      }
+      validRoleIds.push(new Types.ObjectId(rId));
+    }
+
+    // 3) Creamos el plan
+    const created = new this.planModel({
+      tenantId,
+      name,
+      price,
+      features,
+      defaultRoles: validRoleIds,
+    });
+    return await created.save();
+  }
+
+  /**
+   * Listar todos los planes de este tenant.
+   */
+  async findAll(
+    tenantId: string,
+    searchTerm?: string,
+    page = 1,
+    limit = 10,
+  ): Promise<{ data: Plan[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const filter: any = { tenantId };
+    if (searchTerm && searchTerm.trim() !== '') {
+      filter.name = { $regex: searchTerm, $options: 'i' };
+    }
+    const [data, total] = await Promise.all([
+      this.planModel
+        .find(filter)
+        .skip(skip)
+        .limit(limit)
+        .exec(),
+      this.planModel.countDocuments(filter).exec(),
+    ]);
+    return { data, total };
+  }
+
+  /**
+   * Obtener un plan por ID, en este tenant.
+   */
+  async findOne(tenantId: string, id: string): Promise<Plan> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de plan inválido');
+    }
+    const plan = await this.planModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!plan) {
+      throw new NotFoundException(`Plan con ID "${id}" no encontrado en este tenant.`);
+    }
+    return plan;
+  }
+
+  /**
+   * Actualizar un plan: price, features, defaultRoles.
+   */
+  async update(
+    tenantId: string,
+    id: string,
+    updateDto: UpdatePlanDto,
+  ): Promise<Plan> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de plan inválido');
+    }
+    const plan = await this.planModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!plan) {
+      throw new NotFoundException(`Plan con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    // Cambiar precio si viene
+    if (updateDto.price !== undefined) {
+      if (updateDto.price < 0) {
+        throw new BadRequestException('El precio no puede ser negativo');
+      }
+      plan.price = updateDto.price;
+    }
+
+    // Cambiar features
+    if (updateDto.features) {
+      plan.features = updateDto.features;
+    }
+
+    // Cambiar defaultRoles
+    if (updateDto.defaultRoles) {
+      const newRoleIds: Types.ObjectId[] = [];
+      for (const rId of updateDto.defaultRoles) {
+        if (!Types.ObjectId.isValid(rId)) {
+          throw new BadRequestException(`ID de rol inválido: ${rId}`);
+        }
+        const role = await this.rolesService.findOne(tenantId, rId);
+        if (!role) {
+          throw new BadRequestException(`Rol con ID "${rId}" no existe en este tenant.`);
+        }
+        newRoleIds.push(new Types.ObjectId(rId));
+      }
+      plan.defaultRoles = newRoleIds;
+    }
+
+    return await plan.save();
+  }
+
+  /**
+   * Eliminar un plan (hard delete). En Sprint 4 validar usuarios antes.
+   */
+  async remove(tenantId: string, id: string): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de plan inválido');
+    }
+    const plan = await this.planModel
+      .findOne({ _id: id, tenantId })
+      .exec();
+    if (!plan) {
+      throw new NotFoundException(`Plan con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    await this.planModel.deleteOne({ _id: id, tenantId }).exec();
+  }
+
+  async findByName(tenantId: string, name: string): Promise<Plan | null> {
+  return this.planModel.findOne({ tenantId, name }).exec();
+}
+
+}
+// apps/api-core/src/modules/plans/schemas/plan.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Plan extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  name!: string;
+
+  @Prop({ required: true, default: 0 })
+  price!: number;
+
+  @Prop({ type: [String], default: [] })
+  features!: string[];
+
+  @Prop({ type: [Types.ObjectId], ref: 'Role', default: [] })
+  defaultRoles!: Types.ObjectId[];
+}
+
+export const PlanSchema = SchemaFactory.createForClass(Plan);
+
+// Índice compuesto (tenantId, name) con unicidad
+PlanSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+
+// Índice para buscar planes que incluyan cierto rol en defaultRoles
+PlanSchema.index({ tenantId: 1, defaultRoles: 1 });
+// apps/api-core/src/modules/roles/dto/create-role.dto.ts
+
+import {
+  IsNotEmpty,
+  IsString,
+  IsArray,
+  ArrayUnique,
+  ArrayNotEmpty,
+} from 'class-validator';
+
+export class CreateRoleDto {
+  @IsString()
+  @IsNotEmpty()
+  readonly name!: string;
+
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly permissions!: string[]; // IDs de permiso (como strings)
+}
+// apps/api-core/src/modules/roles/dto/update-role.dto.ts
+
+import {
+  IsOptional,
+  IsString,
+  IsArray,
+  ArrayUnique,
+  ArrayNotEmpty,
+} from 'class-validator';
+
+export class UpdateRoleDto {
+  @IsOptional()
+  @IsString()
+  readonly name?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayUnique()
+  @IsString({ each: true })
+  readonly permissions?: string[]; // IDs de permiso opcionales
+}
+// apps/api-core/src/modules/roles/roles.controller.ts
+
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  HttpCode,
+  HttpStatus,
+  Headers,
+  UseGuards,
+  Query,
+  ParseIntPipe,
+} from '@nestjs/common';
+import { RolesService } from './roles.service';
+import { CreateRoleDto } from './dto/create-role.dto';
+import { UpdateRoleDto } from './dto/update-role.dto';
+
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { TenantGuard } from '../../common/guards/tenant.guard';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+
+import { Permissions } from '../../common/decorators/permissions.decorator';
+
+@Controller('roles')
+@UseGuards(JwtAuthGuard, TenantGuard) 
+export class RolesController {
+  constructor(private readonly rolesService: RolesService) {}
+
+  /**
+   * POST /roles
+   * - Sólo usuarios con permiso 'roles.create' pueden acceder.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('roles.create')
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Body() createRoleDto: CreateRoleDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.rolesService.create(tenantId, createRoleDto);
+  }
+
+  /**
+   * GET /roles?search=&page=&limit=
+   * - Usuarios con permiso 'roles.read'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('roles.read')
+  @Get()
+  async findAll(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Query('search') search?: string,
+    @Query(
+      'page',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    page = 1,
+    @Query(
+      'limit',
+      new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST }),
+    )
+    limit = 10,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.rolesService.findAll(tenantId, search, page, limit);
+  }
+
+  /**
+   * PATCH /roles/:id
+   * - Sólo usuarios con permiso 'roles.update'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('roles.update')
+  @Patch(':id')
+  async update(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body() updateRoleDto: UpdateRoleDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.rolesService.update(tenantId, id, updateRoleDto);
+  }
+
+  /**
+   * DELETE /roles/:id
+   * - Sólo usuarios con permiso 'roles.delete'.
+   */
+  @UseGuards(PermissionsGuard)
+  @Permissions('roles.delete')
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.rolesService.remove(tenantId, id);
+  }
+}
+// apps/api-core/src/modules/roles/roles.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+import { Role, RoleSchema } from './schemas/role.schema';
+import { RolesService } from './roles.service';
+import { RolesController } from './roles.controller';
+import { PermissionsModule } from '../permissions/permissions.module';
+import { CacheModule } from '../../common/cache/cache.module';
+
+// Importamos TenantsModule para poder inyectar TenantsService en TenantGuard
+import { TenantsModule } from '../tenants/tenants.module';
+
+// Si tu TenantGuard está en otro archivo, asegúrate de importarlo aquí:
+import { TenantGuard } from '../../common/guards/tenant.guard';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Role.name, schema: RoleSchema }]),
+
+    // Para validar permisos, inyectamos PermissionsModule con forwardRef
+    forwardRef(() => PermissionsModule),
+
+    // CacheModule para invalidar cache de permisos
+    CacheModule,
+
+    // ***** Esto es lo que faltaba: importar TenantsModule *****
+    TenantsModule,
+  ],
+  providers: [
+    RolesService,
+    // Si usas TenantGuard a nivel de controlador, también puedes proveerlo aquí:
+    TenantGuard,
+  ],
+  controllers: [RolesController],
+  exports: [RolesService],
+})
+export class RolesModule {}
+// apps/api-core/src/modules/roles/roles.service.ts
+
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  ConflictException,
+  forwardRef,
+  Inject,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+
+import { Role } from './schemas/role.schema';
+import { CreateRoleDto } from './dto/create-role.dto';
+import { UpdateRoleDto } from './dto/update-role.dto';
+
+// Inyectamos PermissionsService para validar IDs de permisos
+import { PermissionsService } from '../permissions/permissions.service';
+import { CacheService } from '../../common/cache/cache.service';
+
+@Injectable()
+export class RolesService {
+  constructor(
+    @InjectModel(Role.name) private readonly roleModel: Model<Role>,
+
+    // forwardRef para resolver posible dependencia circular con PermissionsModule
+    @Inject(forwardRef(() => PermissionsService))
+    private readonly permissionsService: PermissionsService,
+
+    private readonly cacheService: CacheService,
+  ) {}
+
+  /**
+   * Busca un rol por nombre dentro de un tenant (se usa en Seeder y validaciones).
+   */
+  async findByName(tenantId: string, name: string): Promise<Role | null> {
+    return this.roleModel.findOne({ tenantId, name, deleted: false }).exec();
+  }
+
+  /**
+   * Crear un nuevo rol en un tenant dado.
+   */
+  async create(
+    tenantId: string,
+    createRoleDto: CreateRoleDto,
+  ): Promise<Role> {
+    const { name, permissions } = createRoleDto;
+
+    // 1) Chequear duplicado por (tenantId, name)
+    const exist = await this.roleModel.findOne({ tenantId, name }).exec();
+    if (exist) {
+      throw new ConflictException(`El rol "${name}" ya existe en este tenant.`);
+    }
+
+    // 2) Validar que cada permiso exista en este tenant
+    for (const permId of permissions) {
+      if (!Types.ObjectId.isValid(permId)) {
+        throw new BadRequestException(`ID de permiso inválido: ${permId}`);
+      }
+      const permExists = await this.permissionsService.findOne(tenantId, permId);
+      if (!permExists) {
+        throw new BadRequestException(
+          `Permiso con ID "${permId}" no existe en este tenant.`,
+        );
+      }
+    }
+
+    // 3) Creamos el rol
+    const created = new this.roleModel({
+      tenantId,
+      name,
+      permissions: permissions.map((id) => new Types.ObjectId(id)),
+      deleted: false,
+    });
+
+    const saved = await created.save();
+    // 4) Invalidar cache de permisos para este tenant
+    await this.cacheService.del(`permissions:${tenantId}:*`);
+    return saved;
+  }
+
+  /**
+   * Listar roles (no borrados) de un tenant.
+   */
+  async findAll(
+    tenantId: string,
+    searchTerm?: string,
+    page = 1,
+    limit = 10,
+  ): Promise<{ data: Role[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const filter: any = { tenantId, deleted: false };
+    if (searchTerm && searchTerm.trim() !== '') {
+      filter.name = { $regex: searchTerm, $options: 'i' };
+    }
+    const [data, total] = await Promise.all([
+      this.roleModel.find(filter).skip(skip).limit(limit).exec(),
+      this.roleModel.countDocuments(filter).exec(),
+    ]);
+    return { data, total };
+  }
+
+  /**
+   * Obtener un solo rol por ID, validando tenant y que no esté borrado.
+   */
+  async findOne(tenantId: string, id: string): Promise<Role> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de rol inválido');
+    }
+    const role = await this.roleModel
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
+    if (!role) {
+      throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
+    }
+    return role;
+  }
+
+  /**
+   * Actualizar un rol dentro de un tenant.
+   */
+  async update(
+    tenantId: string,
+    id: string,
+    updateRoleDto: UpdateRoleDto,
+  ): Promise<Role> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de rol inválido');
+    }
+    const role = await this.roleModel
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
+    if (!role) {
+      throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    // Si renombramos
+    if (updateRoleDto.name && updateRoleDto.name !== role.name) {
+      const exist = await this.roleModel
+        .findOne({ tenantId, name: updateRoleDto.name })
+        .exec();
+      if (exist) {
+        throw new ConflictException(`El rol "${updateRoleDto.name}" ya existe en este tenant.`);
+      }
+      role.name = updateRoleDto.name;
+    }
+
+    // Si cambiamos permisos
+    if (updateRoleDto.permissions) {
+      for (const permId of updateRoleDto.permissions) {
+        if (!Types.ObjectId.isValid(permId)) {
+          throw new BadRequestException(`ID de permiso inválido: ${permId}`);
+        }
+        const permExists = await this.permissionsService.findOne(tenantId, permId);
+        if (!permExists) {
+          throw new BadRequestException(`Permiso con ID "${permId}" no existe en este tenant.`);
+        }
+      }
+      role.permissions = updateRoleDto.permissions.map((id) => new Types.ObjectId(id));
+    }
+
+    // Invalidar cache luego de cambios
+    await this.cacheService.del(`permissions:${tenantId}:*`);
+    return await role.save();
+  }
+
+  /**
+   * “Soft-delete” de rol: marcamos deleted = true.
+   */
+  async remove(tenantId: string, id: string): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de rol inválido');
+    }
+    const role = await this.roleModel
+      .findOne({ _id: id, tenantId, deleted: false })
+      .exec();
+    if (!role) {
+      throw new NotFoundException(`Rol con ID "${id}" no encontrado en este tenant.`);
+    }
+
+    role.deleted = true;
+    await role.save();
+    // Invalidar cache luego de borrado
+    await this.cacheService.del(`permissions:${tenantId}:*`);
+  }
+
+  /**
+   * Eliminación “hard” de un permiso de todos los roles de este tenant.
+   * (Se invoca cuando se borra un permiso en PermissionsService.)
+   */
+  async removePermissionFromAllRoles(
+    tenantId: string,
+    permissionId: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(permissionId)) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
+    await this.roleModel.updateMany(
+      { tenantId, permissions: new Types.ObjectId(permissionId) },
+      { $pull: { permissions: new Types.ObjectId(permissionId) } },
+    );
+  }
+
+  /**
+   * Reemplazar permiso en los roles:
+   * - Busca todos los roles de este tenant que contengan oldPermissionId en su array `permissions`.
+   * - En cada rol, reemplaza oldPermissionId por newPermissionId (con el mismo orden en el array).
+   */
+  async replacePermissionInRoles(
+    tenantId: string,
+    oldPermissionId: string,
+    newPermissionId: string,
+  ): Promise<void> {
+    if (
+      !Types.ObjectId.isValid(oldPermissionId) ||
+      !Types.ObjectId.isValid(newPermissionId)
+    ) {
+      throw new BadRequestException('ID de permiso inválido');
+    }
+
+    const oldId = new Types.ObjectId(oldPermissionId);
+    const newId = new Types.ObjectId(newPermissionId);
+
+    // Actualizamos en una sola operación usando un pipeline de MongoDB para mapear el array
+    await this.roleModel.updateMany(
+      { tenantId, permissions: oldId },
+      [
+        {
+          $set: {
+            permissions: {
+              $map: {
+                input: '$permissions',
+                as: 'p',
+                in: {
+                  $cond: [{ $eq: ['$$p', oldId] }, newId, '$$p'],
+                },
+              },
+            },
+          },
+        },
+      ],
+    );
+    // Nota: Si un rol ya contenía newPermissionId junto con oldPermissionId,
+    // aparecerá duplicado en el arreglo. Si deseas eliminar duplicados, podrías
+    // usar una segunda etapa en el pipeline para aplicar $setUnion. Por simplicidad,
+    // dejamos la lógica básica.
+  }
+
+  /**
+   * Dado un array de roleIds, devuelve un array de nombres de permiso
+   * (con cache en Redis). No se toca esta parte.
+   */
+  async getPermissionsForRoles(
+    tenantId: string,
+    roleIds: string[],
+  ): Promise<string[]> {
+    const sortedIds = [...roleIds].sort().join(',');
+    const cacheKey = `permissions:${tenantId}:${sortedIds}`;
+
+    const cached = await this.cacheService.getJSON<string[]>(cacheKey);
+    if (cached !== null) {
+      return cached;
+    }
+
+    const objectIds = roleIds.map((r) => new Types.ObjectId(r));
+    const roles = await this.roleModel
+      .find({ tenantId, _id: { $in: objectIds }, deleted: false })
+      .exec();
+
+    const permIds = roles.reduce<Types.ObjectId[]>((acc, role) => {
+      role.permissions?.forEach((p) => acc.push(p));
+      return acc;
+    }, []);
+
+    if (permIds.length === 0) {
+      await this.cacheService.setJSON(cacheKey, [], 3600);
+      return [];
+    }
+
+    const uniqueIds = Array.from(new Set(permIds.map((p) => p.toString()))).map(
+      (id) => new Types.ObjectId(id),
+    );
+    const permissions = await this.permissionsService.findManyByIds(
+      tenantId,
+      uniqueIds,
+    );
+    const permissionNames = permissions.map((perm) => perm.name);
+
+    await this.cacheService.setJSON(cacheKey, permissionNames, 3600);
+    return permissionNames;
+  }
+}
+// apps/api-core/src/modules/roles/schemas/role.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Role extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  name!: string;
+
+  @Prop({ type: [Types.ObjectId], ref: 'Permission', default: [] })
+  permissions!: Types.ObjectId[];
+
+  @Prop({ default: false })
+  deleted!: boolean;
+}
+
+export const RoleSchema = SchemaFactory.createForClass(Role);
+
+// Índice para unicidad por (tenantId, name)
+RoleSchema.index({ tenantId: 1, name: 1 }, { unique: true });
+// apps/api-core/src/modules/sessions/schemas/session.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Session extends Document {
+  @Prop({ required: true })
+  sessionId!: string; // UUID
+
+  @Prop({ required: true })
+  userId!: string;
+
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  ipAddress!: string;
+
+  @Prop({ default: '' })
+  userAgent?: string;
+
+  @Prop({ default: false })
+  revoked?: boolean;
+}
+
+export const SessionSchema = SchemaFactory.createForClass(Session);
+
+// Índice para búsquedas
+SessionSchema.index({ userId: 1, tenantId: 1, revoked: 1 });
+// apps/api-core/src/modules/sessions/session.module.ts
+
+import { Module, forwardRef } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { Session, SessionSchema } from './schemas/session.schema';
+import { SessionService } from './session.service';
+import { AuthModule } from '../auth/auth.module';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Session.name, schema: SessionSchema }]),
+    forwardRef(() => AuthModule), // para inyectar en AuthService
+  ],
+  providers: [SessionService],
+  exports: [SessionService],
+})
+export class SessionModule {}
+// apps/api-core/src/modules/sessions/session.service.ts
+
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Session } from './schemas/session.schema';
+import { v4 as uuidv4 } from 'uuid';
+
+@Injectable()
+export class SessionService {
+  constructor(@InjectModel(Session.name) private readonly sessionModel: Model<Session>) {}
+
+  /**
+   * Crear nueva sesión
+   */
+  async createSession(
+    userId: string,
+    tenantId: string,
+    ipAddress: string,
+    userAgent: string,
+  ): Promise<Session> {
+    const sessionId = uuidv4();
+    const newSess = new this.sessionModel({
+      sessionId,
+      userId,
+      tenantId,
+      ipAddress,
+      userAgent,
+      revoked: false,
+    });
+    return await newSess.save();
+  }
+
+  /**
+   * Revocar (eliminar) sesión por sessionId
+   */
+  async revokeSession(tenantId: string, sessionId: string): Promise<void> {
+    const result = await this.sessionModel.updateOne(
+      { sessionId, tenantId },
+      { revoked: true },
+    );
+    if (result.matchedCount === 0) {
+      throw new NotFoundException('Sesión no encontrada.');
+    }
+  }
+
+  /**
+   * Obtener sesiones activas de un usuario
+   */
+  async listUserSessions(
+    tenantId: string,
+    userId: string,
+    page = 1,
+    limit = 10,
+  ): Promise<{ data: Session[]; total: number }> {
+    const skip = (page - 1) * limit;
+    const filter = { tenantId, userId, revoked: false };
+    const [data, total] = await Promise.all([
+      this.sessionModel.find(filter).skip(skip).limit(limit).exec(),
+      this.sessionModel.countDocuments(filter).exec(),
+    ]);
+    return { data, total };
+  }
+
+  /**
+   * Verificar que la sesión está activa (no revocada). Usado en SessionGuard.
+   */
+  async isSessionActive(tenantId: string, sessionId: string): Promise<boolean> {
+    const sess = await this.sessionModel.findOne({ tenantId, sessionId, revoked: false }).exec();
+    return !!sess;
+  }
+}
+// apps/api-core/src/modules/tenants/schemas/tenant.schema.ts
+
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class Tenant extends Document {
+  // Guardamos el “identificador legible” en un campo distinto a _id:
+  @Prop({ required: true, unique: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  name!: string;
+}
+
+export const TenantSchema = SchemaFactory.createForClass(Tenant);
+
+// Creamos un índice único sobre tenantId
+TenantSchema.index({ tenantId: 1 }, { unique: true });
+// apps/api-core/src/modules/tenants/tenants.module.ts
+
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+import { Tenant, TenantSchema } from './schemas/tenant.schema';
+import { TenantsService } from './tenants.service';
+
+@Module({
+  imports: [
+    MongooseModule.forFeature([{ name: Tenant.name, schema: TenantSchema }]),
+  ],
+  providers: [TenantsService],
+  exports: [TenantsService],
+})
+export class TenantsModule {}
+// apps/api-core/src/modules/tenants/tenants.service.ts
+
+import {
+  BadRequestException,
+  Injectable,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { Tenant } from './schemas/tenant.schema';
+
+@Injectable()
+export class TenantsService {
+  constructor(
+    @InjectModel(Tenant.name) private readonly tenantModel: Model<Tenant>,
+  ) {}
+
+  /**
+   * Verifica si existe un tenant con tenantId dado.
+   * Retorna true si lo encuentra, false si no.
+   */
+  async findById(tenantId: string): Promise<boolean> {
+    if (!tenantId || tenantId.trim() === '') {
+      throw new BadRequestException('tenantId inválido');
+    }
+    const existing = await this.tenantModel
+      .findOne({ tenantId })
+      .exec();
+    return existing !== null;
+  }
+
+  /**
+   * Crea un nuevo tenant en base a { tenantId, name }.
+   * Si ya existía uno con ese tenantId, lanza ConflictException.
+   */
+  async create(args: { tenantId: string; name: string }): Promise<Tenant> {
+    const { tenantId, name } = args;
+    if (!tenantId || tenantId.trim() === '') {
+      throw new BadRequestException('El tenantId es obligatorio');
+    }
+    if (!name || name.trim() === '') {
+      throw new BadRequestException('El nombre del tenant es obligatorio');
+    }
+
+    // Verificar si ya existe
+    const exist = await this.tenantModel
+      .findOne({ tenantId })
+      .exec();
+    if (exist) {
+      throw new ConflictException(
+        `Ya existe un tenant con tenantId "${tenantId}"`,
+      );
+    }
+
+    const newTenant = new this.tenantModel({ tenantId, name });
+    return await newTenant.save();
+  }
+
+  /**
+   * Recupera el documento completo del tenant (para usos futuros).
+   */
+  async findOneDocument(tenantId: string): Promise<Tenant> {
+    if (!tenantId || tenantId.trim() === '') {
+      throw new BadRequestException('tenantId inválido');
+    }
+    const doc = await this.tenantModel
+      .findOne({ tenantId })
+      .exec();
+    if (!doc) {
+      throw new NotFoundException(`Tenant "${tenantId}" no existe`);
+    }
+    return doc;
+  }
+}
+// apps/api-core/src/modules/users/dto/create-user.dto.ts
+
+import {
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MinLength,
+} from 'class-validator';
+
+export class CreateUserDto {
+  @IsEmail()
+  readonly email!: string;
+  
+  @IsString()
+  @MinLength(8, { message: 'La contraseña debe tener al menos 8 caracteres' })
+  readonly password!: string;
+  
+  @IsOptional()
+  @IsString()
+  readonly name?: string;
+  
+  @IsOptional()
+  @IsString()
+  readonly phone?: string;
+  
+  @IsOptional()
+  @IsString()
+  readonly avatarUrl?: string;
+  
+  roles?: string[]; // Add this line to fix the error
+  plan?: string;
+  metadata?: {
+    name?: string;
+    phone?: string;
+    avatarUrl?: string;
+  };
+}
+// apps/api-core/src/modules/users/dto/update-user.dto.ts
+
+import {
+  IsOptional,
+  IsString,
+  MinLength,
+  IsEmail,
+} from 'class-validator';
+
+export class UpdateUserDto {
+  @IsOptional()
+  @IsEmail()
+  readonly email?: string;
+
+  @IsOptional()
+  @IsString()
+  @MinLength(8, { message: 'La contraseña debe tener al menos 8 caracteres' })
+  readonly password?: string;
+
+  @IsOptional()
+  @IsString()
+  readonly name?: string;
+
+  @IsOptional()
+  @IsString()
+  readonly phone?: string;
+
+  @IsOptional()
+  @IsString()
+  readonly avatarUrl?: string;
+}
+// apps/api-core/src/modules/users/schemas/user.schema.ts
+import { Prop, Schema, SchemaFactory } from '@nestjs/mongoose';
+import { Document, Types } from 'mongoose';
+
+@Schema({ timestamps: true })
+export class User extends Document {
+  @Prop({ required: true })
+  tenantId!: string;
+
+  @Prop({ required: true })
+  email!: string;
+
+  @Prop({ required: true })
+  passwordHash!: string;
+
+  @Prop({ type: [Types.ObjectId], ref: 'Role', default: [] })
+  roles!: Types.ObjectId[];
+
+  @Prop({ type: Types.ObjectId, ref: 'Plan', default: null })
+  plan!: Types.ObjectId;
+
+  @Prop({ type: Object, default: {} })
+  metadata!: {
+    name?: string;
+    phone?: string;
+    avatarUrl?: string;
+    [key: string]: any;
+  };
+}
+
+export const UserSchema = SchemaFactory.createForClass(User);
+
+// Índices para búsquedas de HACL
+UserSchema.index({ tenantId: 1, roles: 1 });
+UserSchema.index({ tenantId: 1, plan: 1 });
+
+// Índice compuesto para (tenantId, email) con unicidad
+UserSchema.index({ tenantId: 1, email: 1 }, { unique: true });// apps/api-core/src/modules/users/users.controller.ts
+
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  ParseIntPipe,
+  Patch,
+  Post,
+  HttpCode,
+  HttpStatus,
+  Headers,
+  Request,
+  ForbiddenException,
+  UseGuards,
+  Query
+} from '@nestjs/common';
+import { UsersService } from './users.service';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { RolesGuard } from '../../common/guards/roles.guard';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { PermissionsGuard } from '../../common/guards/permissions.guard';
+import { Permissions } from '../../common/decorators/permissions.decorator';
+
+@Controller('users')
+export class UsersController {
+  constructor(private readonly usersService: UsersService) {}
+
+  /**
+   * Crear nuevo usuario:
+   * Sólo rol 'admin' puede hacerlo.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Body() createUserDto: CreateUserDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.usersService.create(tenantId, createUserDto);
+  }
+
+  /**
+   * Listar usuarios:
+   * Puede hacerlo 'admin' o 'manager'.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin', 'manager')
+  @Get()
+  async findAll(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Query('page', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) page = 1,
+    @Query('limit', new ParseIntPipe({ errorHttpStatusCode: HttpStatus.BAD_REQUEST })) limit = 10,
+    @Query('search') search?: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.usersService.findAll(tenantId, page, limit, search);
+  }
+  
+  /**
+   * Obtener usuario por ID:
+   * Puede verlo 'admin' o el propio usuario (comparar userId).
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Get(':id')
+  async findOne(
+    @Request() req: any,
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    const requester = req.user.userId;
+    // Si no es admin, sólo puede ver su propio perfil
+    if (!req.user.roles.includes('admin') && requester !== id) {
+      throw new ForbiddenException('No puedes ver este usuario.');
+    }
+    return await this.usersService.findOne(tenantId, id);
+  }
+
+  /**
+   * Actualizar usuario:
+   * 'admin' puede actualizar a cualquiera; 
+   * usuario normal sólo puede actualizar su propio perfil.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Patch(':id')
+  async update(
+    @Request() req: any,
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body() updateUserDto: UpdateUserDto,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    const requester = req.user.userId;
+    if (!req.user.roles.includes('admin') && requester !== id) {
+      throw new ForbiddenException('No puedes actualizar este usuario.');
+    }
+    return await this.usersService.update(tenantId, id, updateUserDto);
+  }
+
+  /**
+   * Eliminar usuario físico:
+   * Sólo 'admin'.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async remove(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.usersService.remove(tenantId, id);
+  }
+
+  /**
+   * Ver roles de un usuario:
+   * Sólo 'admin' o el propio usuario.
+   */
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @Get(':id/roles')
+  async getUserRoles(
+    @Request() req: any,
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    return await this.usersService.getRoles(tenantId, id);
+  }
+}
+// apps/api-core/src/modules/users/users.module.ts
+
+import { Module } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+import { ConfigModule, ConfigService } from '@nestjs/config';
+import { JwtModule } from '@nestjs/jwt';
+
+import { UsersService } from './users.service';
+import { UsersController } from './users.controller';
+import { User, UserSchema } from './schemas/user.schema';
+import { MailerModule } from '../../common/mailer/mailer.module';
+
+@Module({
+  imports: [
+    // 1) Registramos el esquema de Usuario para Mongoose
+    MongooseModule.forFeature([{ name: User.name, schema: UserSchema }]),
+
+    // 2) MailerModule: expone MailerService, que UsersService usa para enviar correos
+    MailerModule,
+
+    // 3) JwtModule: configurado de forma asíncrona para poder inyectar JwtService
+    JwtModule.registerAsync({
+      imports: [ConfigModule], // importamos ConfigModule para poder usar ConfigService
+      useFactory: async (configService: ConfigService) => {
+        const secret = configService.get<string>('JWT_SECRET');
+        if (!secret) {
+          throw new Error('JWT_SECRET no está definido en variables de entorno');
+        }
+        return {
+          secret,
+          signOptions: {
+            // Este token se usa, por ejemplo, para verificación de cuenta o recuperación de contraseña.
+            expiresIn: configService.get<string>('EMAIL_TOKEN_EXPIRES_IN') || '24h',
+          },
+        };
+      },
+      inject: [ConfigService],
+    }),
+  ],
+  controllers: [UsersController],
+  providers: [UsersService],
+  exports: [UsersService], // para que AuthModule o quien lo necesite pueda usar UsersService
+})
+export class UsersModule {}
+// apps/api-core/src/modules/users/users.service.ts
+
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  ConflictException,
+} from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model, Types } from 'mongoose';
+
+// Usamos crypto scrypt en lugar de bcrypt
+import { randomBytes, scrypt as _scrypt } from 'crypto';
+import { promisify } from 'util';
+
+import { User } from './schemas/user.schema';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
+import { MailerService } from '../../common/mailer/mailer.service';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+
+// Convertimos la versión callback de scrypt a una que devuelve promise
+const scrypt = promisify(_scrypt);
+
+@Injectable()
+export class UsersService {
+  constructor(
+    @InjectModel(User.name) private readonly userModel: Model<User>,
+    private readonly mailerService: MailerService,
+    private readonly jwtService: JwtService,
+    private readonly configService: ConfigService,
+  ) {}
+  
+  /**
+  * Crear un nuevo usuario bajo un tenant dado.
+  * @param tenantId — Identificador del tenant (viene del header 'x-tenant-id').
+  * @param createUserDto — Data mínima para crear un usuario.
+  * @returns El usuario creado, sin el campo passwordHash.
+  */
+  async create(tenantId: string, createUserDto: CreateUserDto): Promise<User> {
+    // 1) validar si ya existe correo
+    const exists = await this.userModel.findOne({ tenantId, email: createUserDto.email });
+    if (exists) throw new ConflictException('Email ya registrado.');
+    
+    // 2) generar salt + hash y guardarlo
+    const salt = randomBytes(8).toString('hex');
+    const derivedKey = (await scrypt(createUserDto.password, salt, 64)) as Buffer;
+    const passwordHash = `${salt}:${derivedKey.toString('hex')}`;
+    
+    const newUser = new this.userModel({
+      tenantId,
+      email: createUserDto.email,
+      passwordHash,
+      roles: createUserDto.roles || [],
+      plan: createUserDto.plan || null,
+      metadata: createUserDto.metadata || {},
+    });
+    const savedUser = await newUser.save();
+    
+    // 3) generar token JWT para verificación (payload mínimo)
+    const payload = {
+      sub: savedUser._id.toString(),
+      tenantId: savedUser.tenantId,
+      email: savedUser.email,
+    };
+    const expiresIn = this.configService.get<string>('EMAIL_TOKEN_EXPIRES_IN') || '24h';
+    const verificationToken = this.jwtService.sign(payload, {
+      secret: this.configService.get<string>('JWT_SECRET'),
+      expiresIn,
+    });
+    
+    // 4) enviar correo de verificación
+    await this.mailerService.sendVerificationEmail(
+      tenantId,
+      savedUser.email,
+      savedUser.metadata?.name || savedUser.email,
+      verificationToken,
+    );
+    
+    // 5) retornar usuario sin passwordHash
+    const { passwordHash: _passwordHash, ...userObj } = savedUser.toObject();
+    return userObj as any;
+  }
+  
+  
+  /**
+  * Obtener un solo usuario por ID, validando tenantId.
+  * No expone passwordHash.
+  */
+  async findOne(
+    tenantId: string,
+    id: string,
+  ): Promise<Partial<User>> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de usuario inválido');
+    }
+    // Buscamos documento con matching de id + tenantId
+    const user = await this.userModel
+    .findOne({ _id: id, tenantId })
+    .select('-passwordHash')
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${id}" no encontrado en este tenant.`);
+    }
+    return user.toObject();
+  }
+  
+  /**
+  * Actualizar datos (email, contraseña, metadata) de un usuario en un tenant.
+  * Si cambia el email, validamos duplicado dentro del mismo tenant.
+  * Si cambia contraseña, re-hasheamos con scrypt+salt.
+  */
+  async update(
+    tenantId: string,
+    id: string,
+    updateUserDto: UpdateUserDto,
+  ): Promise<Partial<User>> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de usuario inválido');
+    }
+    // Verificamos que el usuario exista y pertenezca al tenantId
+    const user = await this.userModel
+    .findOne({ _id: id, tenantId })
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${id}" no encontrado en este tenant.`);
+    }
+    
+    // 1) Si se cambia email, validar que no exista en este tenant
+    if (updateUserDto.email && updateUserDto.email !== user.email) {
+      const existe = await this.userModel
+      .findOne({ tenantId, email: updateUserDto.email })
+      .exec();
+      if (existe) {
+        throw new ConflictException(
+          `El email "${updateUserDto.email}" ya está registrado en este tenant.`,
+        );
+      }
+      user.email = updateUserDto.email;
+    }
+    
+    // 2) Si se cambia contraseña, generar nuevo salt+hash
+    if (updateUserDto.password) {
+      const newSalt = randomBytes(16).toString('hex');
+      const newDerivedKey = (await scrypt(updateUserDto.password, newSalt, 64)) as Buffer;
+      user.passwordHash = `${newSalt}:${newDerivedKey.toString('hex')}`;
+    }
+    
+    // 3) Actualizar metadata (name, phone, avatarUrl)
+    user.metadata = {
+      ...user.metadata,
+      ...(updateUserDto.name !== undefined && { name: updateUserDto.name }),
+      ...(updateUserDto.phone !== undefined && { phone: updateUserDto.phone }),
+      ...(updateUserDto.avatarUrl !== undefined && { avatarUrl: updateUserDto.avatarUrl }),
+    };
+    
+    const updated = await user.save();
+    const { passwordHash: _, ...result } = updated.toObject();
+    return result;
+  }
+  
+  /**
+  * Eliminar un usuario en un tenant. Realiza borrado físico.
+  */
+  async remove(
+    tenantId: string,
+    id: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID de usuario inválido');
+    }
+    const user = await this.userModel
+    .findOne({ _id: id, tenantId })
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${id}" no encontrado en este tenant.`);
+    }
+    await this.userModel.deleteOne({ _id: id, tenantId }).exec();
+  }
+  
+  /**
+  * Agrega un rol (roleId) a un usuario. Ambos deben pertenecer al mismo tenant.
+  */
+  async addRole(
+    tenantId: string,
+    userId: string,
+    roleId: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(roleId)) {
+      throw new BadRequestException('ID inválido (usuario o rol)');
+    }
+    // Verificamos que el usuario exista en este tenant
+    const user = await this.userModel
+    .findOne({ _id: userId, tenantId })
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${userId}" no encontrado en este tenant.`);
+    }
+    // Comprobar que no esté ya asignado
+    const already = user.roles?.find(r => r.toString() === roleId);
+    if (already) {
+      throw new ConflictException(`El usuario ya tiene asignado ese rol.`);
+    }
+    user.roles?.push(new Types.ObjectId(roleId));
+    await user.save();
+  }
+  
+  /**
+  * Quita un rol (roleId) de un usuario en este tenant.
+  */
+  async removeRole(
+    tenantId: string,
+    userId: string,
+    roleId: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(roleId)) {
+      throw new BadRequestException('ID inválido (usuario o rol)');
+    }
+    const user = await this.userModel
+    .findOne({ _id: userId, tenantId })
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${userId}" no encontrado en este tenant.`);
+    }
+    user.roles = user.roles?.filter(r => r.toString() !== roleId);
+    await user.save();
+  }
+  
+  /**
+  * Asigna un plan (planId) a un usuario en este tenant.
+  */
+  async setPlan(
+    tenantId: string,
+    userId: string,
+    planId: string,
+  ): Promise<void> {
+    if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(planId)) {
+      throw new BadRequestException('ID inválido (usuario o plan)');
+    }
+    const user = await this.userModel
+    .findOne({ _id: userId, tenantId })
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${userId}" no encontrado en este tenant.`);
+    }
+    user.plan = new Types.ObjectId(planId);
+    await user.save();
+  }
+  
+  /**
+  * Método de utilidad para AuthModule: buscar usuario por email+tenantId
+  * (necesario para validar credenciales)
+  */
+  async findByEmail(
+    tenantId: string,
+    email: string,
+  ): Promise<User | null> {
+    return this.userModel.findOne({ tenantId, email }).exec();
+  }
+  
+  async getRoles(tenantId: string, userId: string): Promise<string[]> {
+    const user = await this.userModel
+    .findOne({ _id: userId, tenantId })
+    .select('roles')
+    .exec();
+    if (!user) {
+      throw new NotFoundException(`Usuario con ID "${userId}" no encontrado en este tenant.`);
+    }
+    // Devolver array de roleIds como strings
+    return user.roles.map((r) => r.toString());
+  }
+  
+  /**
+  * Listar usuarios de un tenant específico, con paginación.
+  * @param tenantId — Tenant actual.
+  * @param page — Página (1-based).
+  * @param limit — Cantidad por página.
+  */
+  async findAll(
+    tenantId: string,
+    page = 1,
+    limit = 10,
+    searchTerm?: string,
+  ): Promise<{ data: Partial<User>[]; total: number }> {
+    const skip = (page - 1) * limit;
+    // Construir filtro base
+    const filter: any = { tenantId };
+    if (searchTerm && searchTerm.trim() !== '') {
+      // Buscamos en email o metadata.name usando regex
+      filter.$or = [
+        { email: { $regex: searchTerm, $options: 'i' } },
+        { 'metadata.name': { $regex: searchTerm, $options: 'i' } },
+      ];
+    }
+    
+    const [data, total] = await Promise.all([
+      this.userModel
+      .find(filter)
+      .skip(skip)
+      .limit(limit)
+      .select('-passwordHash')
+      .exec(),
+      this.userModel.countDocuments(filter).exec(),
+    ]);
+    return { data, total };
+  }
+  
+  async updatePassword(
+    tenantId: string,
+    userId: string,
+    newPasswordHash: string,
+  ): Promise<void> {
+    const result = await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { passwordHash: newPasswordHash },
+    );
+    if (result.matchedCount === 0) {
+      throw new NotFoundException('Usuario no encontrado.');
+    }
+  }
+}
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { RequestContext } from '../../interfaces/context.interface';
+
+/**
+ * `AsyncContext` centraliza el almacenamiento del `RequestContext`
+ * usando AsyncLocalStorage para que cualquier código descendiente
+ * pueda recuperarlo sin pasar `requestId`.
+ */
+class AsyncContext {
+  private readonly als = new AsyncLocalStorage<RequestContext>();
+
+  run<T>(ctx: RequestContext, fn: () => Promise<T>): Promise<T> {
+    return this.als.run(ctx, fn);
+  }
+
+  get(): RequestContext | undefined {
+    return this.als.getStore();
+  }
+}
+
+export const asyncContext = new AsyncContext();
+import { Controller, Get } from '@nestjs/common';
+import { ApiOperation, ApiTags, ApiResponse } from '@nestjs/swagger';
+import { StepMetadataService } from '../services/step-metadata.service';
+
+@ApiTags('Pipeline')
+@Controller('pipeline')
+export class StepsController {
+  constructor(private readonly svc: StepMetadataService) {}
+
+  @Get('steps')
+  @ApiOperation({
+    summary: 'Lista todos los Steps registrados y su metadata',
+  })
+  @ApiResponse({ status: 200, description: 'Listado de Steps' })
+  list() {
+    return {
+      generatedAt: new Date().toISOString(),
+      steps: this.svc.list(),
+    };
+  }
+}
+import { StepConfig } from "../../interfaces/pipeline-step.interface";
+
+export interface ElementConfig {
+  name: string;
+  if?: string;                        // condición a evaluar
+  parallel?: boolean;                 // true → paralelizable
+  configOverride?: Partial<StepConfig>;
+}
+
+export interface PhaseConfig {
+  hooksBefore?: Array<string | ElementConfig>;
+  steps?: Array<string | ElementConfig>;
+  hooksAfter?: Array<string | ElementConfig>;
+}
+
+export interface PipelineConfig {
+  schemaVersion?: string;
+  phases: string[];                 // orden de ejecución
+  disabledPhases?: string[];
+  disabledSteps?: string[];
+  pipelines?: Record<string, any>;  // se mantiene para compatibilidad v1
+  [phase: string]: any;             // “pre”, “processing”, “post”, fases dinámicas…
+}
+// authorization.error.ts
+import { BasePipelineError } from './base-error';
+export class AuthorizationError extends BasePipelineError {
+  readonly status = 403;
+  constructor(msg = 'Forbidden') {
+    super(msg);
+  }
+}
+export abstract class BasePipelineError extends Error {
+    abstract readonly status: number;
+    readonly timestamp = Date.now();
+    protected constructor(message: string) {
+        super(message);
+        Object.setPrototypeOf(this, new.target.prototype);
+    }
+}export class InvalidPipelineConfigError extends Error {
+  public readonly code = 'INVALID_PIPELINE_CONFIG';
+  constructor(public readonly details: any) {
+    super('El archivo de configuración de pipeline es inválido');
+    Object.setPrototypeOf(this, InvalidPipelineConfigError.prototype);
+  }
+}
+
+// ratelimit.error.ts
+import { BasePipelineError } from './base-error';
+export class RateLimitError extends BasePipelineError {
+  readonly status = 429;
+  constructor(msg = 'Too many requests') {
+    super(msg);
+  }
+}
+// validation.error.ts
+import { BasePipelineError } from './base-error';
+export class ValidationError extends BasePipelineError {
+  readonly status = 400;
+  constructor(public details: any, msg = 'Invalid payload') {
+    super(msg);
+  }
+}import { Injectable, Logger } from '@nestjs/common';
+
+import { RequestContext } from '../../interfaces/context.interface';
+
+import { STEP_REGISTRY } from '../../extensions/steps/step-registry';
+import { ConfigurationSubsystem } from '../subsystems/configuration/configuration.subsystem';
+import { ContextSubsystem } from '../subsystems/context/context.subsystem';
+
+import { ElementConfig, PipelineConfig } from '../dto/pipeline-config.dto';
+import { evaluateCondition } from '../utils/evaluate-condition.util';
+import { PipelineFactory } from '../../interfaces/pipeline-factory.interface';
+import { PipelineStepConstructor } from '../../interfaces/pipeline-step.interface';
+
+@Injectable()
+export class FrameworkPipelineFactory implements PipelineFactory {
+  private readonly logger = new Logger(FrameworkPipelineFactory.name);
+  
+  constructor(
+    private readonly cfgService: ConfigurationSubsystem,
+    private readonly ctxService: ContextSubsystem,
+  ) {}
+  
+  /* ─────────────────────────────────────────────────────────────
+  *  Método público que el interceptor llama para construir
+  *  el pipeline de la petición.
+  * ──────────────────────────────────────────────────────────── */
+  async getPipeline(
+    name: string,
+    context: RequestContext,
+  ): Promise<Record<string, any>> {
+    const cfg = this.cfgService.getConfig(context) as PipelineConfig;
+    
+    /* ===== 1) Compatibilidad con esquema antiguo (pipelines.*) ===== */
+    if (cfg.pipelines && cfg.pipelines[name]) {
+      this.logger.warn(`⚠️  Usando esquema LEGACY pipelines.${name}`);
+      return this.legacyToDynamic(cfg.pipelines[name], context);
+    }
+    if (cfg.pipelines && cfg.pipelines['default'] && name !== 'default') {
+      this.logger.warn(
+        `Pipeline "${name}" no hallado; fallback legacy pipelines.default`,
+      );
+      return this.legacyToDynamic(cfg.pipelines['default'], context);
+    }
+    
+    /* ===== 2) Esquema nuevo ===== */
+    if (!Array.isArray(cfg.phases) || cfg.phases.length === 0) {
+      this.logger.error('No se encontró phases[] en configuración.');
+      return this.getDefaultPipeline(context);
+    }
+    
+    const result: Record<string, any> = {};
+    for (const phaseName of cfg.phases) {
+      const phaseCfg = (cfg as any)[phaseName] ?? {};
+      const orderedElements: Array<string | ElementConfig> = [
+        ...(phaseCfg.hooksBefore ?? []),
+        ...(phaseCfg.steps ?? []),
+        ...(phaseCfg.hooksAfter ?? []),
+      ];
+      
+      /*  Instanciar cada elemento (string u objeto)  */
+      const instantiated = orderedElements
+      .map((el) => this.createAndConfigure(el, context))
+      .filter(Boolean) as any[]; // quita null (condición “if” falsa)
+      
+      result[phaseName] = instantiated;
+    }
+    
+    return result;
+  }
+  
+  /* ──────────────────────────────────────────────────────────── */
+  /** Crea un PipelineStep a partir de string o { name,… }. */
+  private createAndConfigure(
+    element: string | ElementConfig,
+    ctx: RequestContext,
+  ) {
+    /* --- 1) Resolver nombre --- */
+    const name = typeof element === 'string' ? element : element.name;
+    
+    /* --- 2) Evaluar condición `if` si aplica --- */
+    if (typeof element !== 'string') {
+      const ok = evaluateCondition(element.if, ctx);
+      if (!ok) return null; // omitido por condición
+    }
+    
+    /* --- 3) Instanciar la clase de Step / Hook --- */
+    const StepClass = STEP_REGISTRY[name] as PipelineStepConstructor; // 👈 cast explícito
+    if (!StepClass) {
+      throw new Error(`Paso/Hook "${name}" no registrado en STEP_REGISTRY`);
+    }
+    const instance = new StepClass(this.ctxService);
+    
+    /* --- 4) Aplicar flags parallel / overrides de config --- */
+    if (typeof element !== 'string') {
+      instance.config = {
+        ...instance.config,
+        parallelizable: element.parallel ?? false,
+        ...element.configOverride,
+      };
+    }
+    
+    return instance;
+  }
+  
+  /* ──────────────────────────────────────────────────────────── */
+  /** Convierte el objeto legacy ({ pre:[], processing:[], … }) */
+  private legacyToDynamic(
+    legacyObj: any,
+    ctx: RequestContext,
+  ): Record<string, any> {
+    const phases = ['pre', 'processing', 'post'];
+    const out: Record<string, any> = {};
+    phases.forEach((p) => {
+      out[p] = (legacyObj[p] ?? []).map((n: string) =>
+        this.createAndConfigure(n, ctx),
+    );
+  });
+  return out;
+}
+
+/* ──────────────────────────────────────────────────────────── */
+/** Pipeline mínimo si no hay config válida. */
+async getDefaultPipeline(
+  context: RequestContext,               // 👈 acepta el contexto
+): Promise<Record<string, any>> {
+  /* usamos el mismo context al instanciar los pasos */
+  const pre  = [this.createAndConfigure('LoggingStep', context)];
+  const post = [this.createAndConfigure('ResponseFormatterStep', context)];
+  return { pre, processing: [], post };
+}
+}
+import { Module } from '@nestjs/common';
+
+import { PipelineEngineService } from './pipeline-engine.service';
+
+/* ─── Subsistemas del core ───────────────────────── */
+import { ContextSubsystem } from './subsystems/context/context.subsystem';
+import { LogCollectorSubsystem } from './subsystems/log/log-collector.subsystem';
+import { AuditTrailSubsystem } from './subsystems/audit/audit-trail.subsystem';
+import { ErrorManagerSubsystem } from './subsystems/error-manager/error-manager.subsystem';
+import { StepFilterSubsystem } from './subsystems/filter/step-filter.subsystem';
+import { ExecutionControllerSubsystem } from './subsystems/execution-controller/execution-controller.subsystem';
+import { ConfigurationSubsystem } from './subsystems/configuration/configuration.subsystem';
+import { ServiceResolverSubsystem } from './subsystems/service/service-resolver.subsystem';
+
+/* ─── Fábrica (renombrada) ───────────────────────── */
+import { FrameworkPipelineFactory } from './factory/framework-pipeline.factory';
+import { RequestPipelineProvider } from './providers/request-pipeline.provider';
+import { StepsController } from './controllers/steps.controller';
+import { StepMetadataService } from './services/step-metadata.service';
+
+@Module({
+  controllers: [StepsController],          // 👈 nuevo
+  
+  providers: [
+    /* Motor */
+    PipelineEngineService,
+    /* Fábrica */
+    FrameworkPipelineFactory,
+    /* Subsistemas */
+    ContextSubsystem,
+    LogCollectorSubsystem,
+    AuditTrailSubsystem,
+    ErrorManagerSubsystem,
+    StepFilterSubsystem,
+    ExecutionControllerSubsystem,
+    ConfigurationSubsystem,
+    ServiceResolverSubsystem,
+    RequestPipelineProvider,
+    StepMetadataService,
+  ],
+  exports: [
+    /* Motor y fábrica */
+    PipelineEngineService,
+    FrameworkPipelineFactory,
+    /* Subsistemas (para quien los necesite) */
+    ContextSubsystem,
+    LogCollectorSubsystem,
+    AuditTrailSubsystem,
+    ErrorManagerSubsystem,
+    StepFilterSubsystem,
+    ExecutionControllerSubsystem,
+    ConfigurationSubsystem,
+    ServiceResolverSubsystem,
+    RequestPipelineProvider,
+    StepMetadataService
+  ],
+})
+export class PipelineCoreModule {}
+// src/pipeline/core/pipeline-engine.service.ts
+import { Injectable, Logger } from '@nestjs/common';
+
+import { PipelineStep } from '../interfaces/pipeline-step.interface';
+import { RequestContext } from '../interfaces/context.interface';
+import { getStepMetadata } from '../decorators/step-definition.decorator';
+
+/* ── Subsistemas ────────────────────────────────────── */
+import { AuditTrailSubsystem } from './subsystems/audit/audit-trail.subsystem';
+import { ErrorManagerSubsystem } from './subsystems/error-manager/error-manager.subsystem';
+import { StepFilterSubsystem } from './subsystems/filter/step-filter.subsystem';
+import { ContextSubsystem } from './subsystems/context/context.subsystem';
+import { LogCollectorSubsystem } from './subsystems/log/log-collector.subsystem';
+
+/* AsyncLocalStorage wrapper */
+import { asyncContext } from './als/async-context';
+
+/**
+ * Motor de ejecución de pipelines.
+ *
+ * 1. Corre todo dentro de AsyncLocalStorage => cualquier Step puede
+ *    llamar this.ctx.getContext() sin parámetros.
+ * 2. Soporta fases dinámicas, condicionales y pasos paralelos.
+ * 3. Registra auditoría, logs y maneja errores según onError.
+ */
+@Injectable()
+export class PipelineEngineService {
+  private readonly logger = new Logger(PipelineEngineService.name);
+
+  constructor(
+    private readonly audit: AuditTrailSubsystem,
+    private readonly errorManager: ErrorManagerSubsystem,
+    private readonly filter: StepFilterSubsystem,
+    private readonly ctxService: ContextSubsystem,
+    private readonly logCollector: LogCollectorSubsystem,
+  ) {}
+
+  /**
+   * Ejecuta un pipeline ya instanciado.
+   * @param context       Contexto de la petición
+   * @param stepsByPhase  Mapa { fase: PipelineStep[] }
+   */
+  async executeWithSteps(
+    context: RequestContext,
+    stepsByPhase: Record<string, PipelineStep[]>,
+  ): Promise<void> {
+    /* 1) Creamos un ámbito ALS que vive durante todo el pipeline */
+    await asyncContext.run(context, async () => {
+      /* 2) Recorremos fases en el orden de llegada */
+      for (const phaseName of Object.keys(stepsByPhase)) {
+        const original = stepsByPhase[phaseName] ?? [];
+        const phaseSteps = this.filter.filter(phaseName, original);
+        if (phaseSteps.length === 0) {
+          this.logger.debug(
+            `[Pipeline] Fase "${phaseName}" sin steps habilitados`,
+          );
+          continue;
+        }
+
+        /* Agrupar por paralelizable */
+        const parallel   = phaseSteps.filter((s) => s.config?.parallelizable);
+        const sequential = phaseSteps.filter((s) => !s.config?.parallelizable);
+
+        /* Ejecutar paralelos */
+        if (parallel.length) {
+          await Promise.all(
+            parallel.map((s) => this.runSingleStep(s, phaseName, context)),
+          );
+        }
+
+        /* Ejecutar secuenciales en orden */
+        for (const step of sequential) {
+          await this.runSingleStep(step, phaseName, context);
+        }
+      }
+      /* 3) Al salir del run(), ALS descarta el contexto automáticamente */
+    });
+  }
+
+  // ───────────────────────── helpers ──────────────────────────
+
+  /** Ejecuta y monitorea un paso individual */
+  private async runSingleStep(
+    step: PipelineStep,
+    phaseName: string,
+    context: RequestContext,
+  ): Promise<void> {
+    const start = Date.now();
+    const meta = getStepMetadata(step.constructor);
+    const stepName = meta?.name ?? step.constructor.name;
+
+    await this.audit.logEvent('StepStarted', { step: stepName, phase: phaseName });
+
+    try {
+      await step.execute(); // 👈 sin requestId
+
+      const duration = Date.now() - start;
+      await this.audit.logEvent('StepSucceeded', {
+        step: stepName,
+        phase: phaseName,
+        durationMs: duration,
+      });
+      this.logCollector.collect(context, {
+        phase: phaseName,
+        step: stepName,
+        status: 'success',
+        durationMs: duration,
+      });
+    } catch (err: any) {
+      const duration = Date.now() - start;
+
+      await this.errorManager.handle(err, context, stepName);
+      await this.audit.logEvent('StepFailed', {
+        step: stepName,
+        phase: phaseName,
+        durationMs: duration,
+        error: err.message,
+      });
+      this.logCollector.collect(context, {
+        phase: phaseName,
+        step: stepName,
+        status: 'error',
+        durationMs: duration,
+        details: err.message,
+      });
+
+      /* Abortamos si el paso no permite continuar */
+      if (step.config?.onError !== 'continue') {
+        throw err; // capturado por filtro global
+      }
+    }
+  }
+}
+// src/pipeline/core/providers/request-pipeline.provider.ts
+import { Provider } from '@nestjs/common';
+import { STEP_REGISTRY } from '../../extensions/steps/step-registry';
+
+
+import { ContextSubsystem } from '../subsystems/context/context.subsystem';
+import { LogCollectorSubsystem } from '../subsystems/log/log-collector.subsystem';
+import { AuditTrailSubsystem } from '../subsystems/audit/audit-trail.subsystem';
+import { ErrorManagerSubsystem } from '../subsystems/error-manager/error-manager.subsystem';
+import { PipelineStep } from '../../interfaces/pipeline-step.interface';
+
+type StepsByPhase = Record<string, PipelineStep[]>;
+
+/** Útil solo como inyección inicial; la factory real sobreescribirá después. */
+export const RequestPipelineProvider: Provider = {
+  provide: 'REQUEST_PIPELINE',
+  useFactory: (
+    ctx: ContextSubsystem,
+    logger: LogCollectorSubsystem,
+    audit: AuditTrailSubsystem,
+    err: ErrorManagerSubsystem,
+  ): StepsByPhase => {
+    // crea un diccionario vacío (no queremos steps por defecto)
+    return {};
+  },
+  inject: [
+    ContextSubsystem,
+    LogCollectorSubsystem,
+    AuditTrailSubsystem,
+    ErrorManagerSubsystem,
+  ],
+};
+import { Injectable } from '@nestjs/common';
+import { STEP_REGISTRY } from '../../extensions/steps/step-registry';
+import { getStepMetadata } from '../../decorators/step-definition.decorator';
+
+/** Devuelve la metadata declarada en @StepDefinition de cada Step */
+@Injectable()
+export class StepMetadataService {
+  list() {
+    return Object.values(STEP_REGISTRY)
+      .map((cls: any) => getStepMetadata(cls))
+      .filter(Boolean)
+      .sort((a, b) => a!.name.localeCompare(b!.name));
+  }
+}
+// src/pipeline/subsystems/audit/audit-adapter.interface.ts
+export interface AuditEntry {
+  event: string;
+  payload: any;
+  timestamp: number;
+}
+
+export interface AuditAdapter {
+  record(data: AuditEntry): Promise<void>;
+}
+// src/pipeline/subsystems/audit/audit-trail.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { ConsoleAuditAdapter } from './console.adapter';
+import { AuditAdapter, AuditEntry } from './audit-adapter.interface';
+
+@Injectable()
+export class AuditTrailSubsystem {
+  private adapters: AuditAdapter[] = [new ConsoleAuditAdapter()];
+
+  async logEvent(event: string, payload: any) {
+    const entry: AuditEntry = {
+      event,
+      payload,
+      timestamp: Date.now(),
+    };
+    for (const adapter of this.adapters) {
+      await adapter.record(entry);
+    }
+  }
+
+  addAdapter(adapter: AuditAdapter) {
+    this.adapters.push(adapter);
+  }
+}
+// src/pipeline/subsystems/audit/console.adapter.ts
+
+import { AuditAdapter, AuditEntry } from "./audit-adapter.interface";
+
+
+export class ConsoleAuditAdapter implements AuditAdapter {
+  async record(data: AuditEntry): Promise<void> {
+    console.log(
+      `[AUDIT] ${data.event}`,
+      JSON.stringify(data.payload),
+      `@ ${new Date(data.timestamp).toISOString()}`,
+    );
+  }
+}
+// src/pipeline/core/subsystems/configuration/configuration.subsystem.ts
+import { Injectable, Logger } from '@nestjs/common';
+import * as fs from 'fs';
+import * as path from 'path';
+
+import { RequestContext } from '../../../interfaces/context.interface';
+import { PipelineConfig, PhaseConfig, ElementConfig } from '../../dto/pipeline-config.dto';
+import { InvalidPipelineConfigError } from '../../errors/invalid-pipeline-config.error';
+
+@Injectable()
+export class ConfigurationSubsystem {
+  /* ─── cache in-memory ─── */
+  private cache = new Map<string, { config: PipelineConfig; loadedAt: number }>();
+  private readonly CACHE_TTL_MS = 60_000;                    // 60 s
+  private readonly logger = new Logger(ConfigurationSubsystem.name);
+
+  /* ─── config global (default) ─── */
+  private globalConfig: PipelineConfig;
+
+  constructor() {
+    this.globalConfig = this.loadAndValidate('default');
+    this.logger.log('[CONFIG] ✅ default.json cargado y validado');
+  }
+
+  /* ───────────────────────────────────────────────────────── */
+  /** Devuelve config combinada (default + tenant) con cache */
+  public getConfig(context: RequestContext): PipelineConfig {
+    if (context.meta.__config) return context.meta.__config;
+
+    const tenant = (context.headers?.['x-tenant'] || 'default').toString();
+    const now = Date.now();
+
+    /* leer desde cache o disco si expiró */
+    if (
+      !this.cache.has(tenant) ||
+      now - this.cache.get(tenant)!.loadedAt > this.CACHE_TTL_MS
+    ) {
+      const tenantCfg = this.loadAndValidate(tenant);
+      const combined: PipelineConfig = {
+        ...this.globalConfig,
+        ...tenantCfg,
+      };
+      this.cache.set(tenant, { config: combined, loadedAt: now });
+      this.logger.log(`[CONFIG] 🧩 (${tenant}) merge ok`);
+    }
+
+    context.meta.__config = this.cache.get(tenant)!.config;
+    return context.meta.__config;
+  }
+
+  /** Acceso rápido a un valor global */
+  public getValue(key: string, fallback: any = null): any {
+    return (this.globalConfig as any)[key] ?? fallback;
+  }
+
+  /* ────────── helpers privados ────────── */
+  private loadAndValidate(name: string): PipelineConfig {
+    const cfg = this.loadConfigFile(name);
+    try {
+      return this.validateConfigObject(cfg);
+    } catch (err: any) {
+      if (err instanceof InvalidPipelineConfigError) throw err;
+      this.logger.error(`[CONFIG] ❌ ${name}.json inválido: ${err.message}`);
+      throw err;
+    }
+  }
+
+private loadConfigFile(name: string): any {
+  const searchRoots = [
+    process.env.CONFIG_DIR,                  // 1) override explícito
+    path.resolve(process.cwd(), 'config'),   // 2) carpeta config en raíz
+    path.resolve(__dirname, '../../../../config'), // 3) fallback relativo (dev)
+  ].filter(Boolean);
+
+  for (const root of searchRoots) {
+    const filePath = path.join(root!, `${name}.json`);
+    if (fs.existsSync(filePath)) {
+      try {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        this.logger.log(`[CONFIG] ✅ Cargado ${filePath}`);
+        return JSON.parse(raw);
+      } catch (e) {
+        this.logger.error(`[CONFIG] ❌ Error parseando ${filePath}: ${e}`);
+        return {};
+      }
+    }
+  }
+
+  this.logger.warn(`[CONFIG] ⚠️  ${name}.json no encontrado en ${searchRoots.join(', ')}`);
+  return {};
+}
+
+  /** Validación mínima de esquema (v1.0) */
+  private validateConfigObject(obj: any): PipelineConfig {
+    if (!obj || typeof obj !== 'object') {
+      throw new InvalidPipelineConfigError('El JSON no es un objeto');
+    }
+
+    /* permitir esquema viejo (pipelines…) sin phases */
+    if (!Array.isArray(obj.phases)) {
+      // legacy: agregamos por compatibilidad
+      obj.phases = ['pre', 'processing', 'post'];
+    }
+
+    /* Validar cada fase declarada */
+    for (const phase of obj.phases) {
+      const phaseCfg: PhaseConfig | undefined = obj[phase];
+      if (phaseCfg && typeof phaseCfg !== 'object') {
+        throw new InvalidPipelineConfigError(
+          `La fase "${phase}" debe ser un objeto con steps/hooks`,
+        );
+      }
+      ['hooksBefore', 'steps', 'hooksAfter'].forEach((key) => {
+        const arr = (phaseCfg as any)?.[key];
+        if (arr && !Array.isArray(arr)) {
+          throw new InvalidPipelineConfigError(
+            `En fase "${phase}", "${key}" debe ser array`,
+          );
+        }
+        if (Array.isArray(arr)) {
+          arr.forEach((el: any, idx: number) => {
+            if (typeof el === 'string') return;
+            if (
+              typeof el === 'object' &&
+              typeof (el as ElementConfig).name === 'string'
+            )
+              return;
+            throw new InvalidPipelineConfigError(
+              `Elemento inválido en ${phase}.${key}[${idx}]`,
+            );
+          });
+        }
+      });
+    }
+
+    return obj as PipelineConfig;
+  }
+}
+// src/pipeline/subsystems/context/context.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { RequestContext } from '../../../interfaces/context.interface';
+import { asyncContext } from '../../als/async-context';
+
+@Injectable()
+export class ContextSubsystem {
+
+  setContext(ctx: RequestContext) {
+    asyncContext.run(ctx, async () => {}); // noop; se establece el store
+  }
+
+  getContext(): RequestContext | undefined {
+    return asyncContext.get();
+  }
+}
+// src/pipeline/subsystems/error-manager/error-manager.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { RequestContext } from '../../../interfaces/context.interface';
+
+@Injectable()
+export class ErrorManagerSubsystem {
+  async handle(error: any, context: RequestContext, stepName: string) {
+    context.errors ??= [];
+    context.errors.push({
+      step: stepName,
+      message: error.message || 'Unknown error',
+      timestamp: Date.now(),
+    });
+    console.error(`[ERROR][${stepName}]`, error);
+  }
+}
+// src/pipeline/subsystems/execution-controller/execution-controller.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { ConfigurationSubsystem } from '../configuration/configuration.subsystem';
+import { PipelinePhase } from '../../../interfaces/pipeline-step.interface';
+import { RequestContext } from '../../../interfaces/context.interface';
+
+@Injectable()
+export class ExecutionControllerSubsystem {
+  constructor(private readonly config: ConfigurationSubsystem) {}
+  
+  public isPhaseEnabled(phaseName: string, context: RequestContext): boolean {
+    const cfg = this.config.getConfig(context);
+    return !(cfg.disabledPhases ?? []).includes(phaseName);
+  }
+  
+  public isStepEnabled(stepName: string, context: RequestContext): boolean {
+    const cfg = this.config.getConfig(context);
+    if (cfg.disabledSteps && Array.isArray(cfg.disabledSteps)) {
+      return !cfg.disabledSteps.includes(stepName);
+    }
+    return true;
+  }
+}
+// src/pipeline/subsystems/filter/step-filter.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { ContextSubsystem } from '../context/context.subsystem';
+import { ExecutionControllerSubsystem } from '../execution-controller/execution-controller.subsystem';
+import { PipelinePhase, PipelineStep } from '../../../interfaces/pipeline-step.interface';
+
+@Injectable()
+export class StepFilterSubsystem {
+  constructor(
+    private readonly executionController: ExecutionControllerSubsystem,
+    private readonly contextService: ContextSubsystem,
+  ) {}
+  
+  public filter(
+    phaseName: string,
+    steps: PipelineStep[],
+  ): PipelineStep[] {
+    const context = this.contextService.getContext();
+    if (!context) return [];
+    
+    if (!this.executionController.isPhaseEnabled(phaseName, context)) return [];
+    
+    return steps.filter((step) => {
+      const stepName = step.constructor.name;
+      return this.executionController.isStepEnabled(stepName, context);
+    });
+  }
+}
+// src/pipeline/subsystems/log/log-collector.subsystem.ts
+import { Injectable } from '@nestjs/common';
+import { RequestContext, StepExecutionLog } from '../../../interfaces/context.interface';
+
+@Injectable()
+export class LogCollectorSubsystem {
+  collect(context: RequestContext, log: StepExecutionLog) {
+    if (!context.meta.logs) context.meta.logs = [];
+    context.meta.logs.push(log);
+    console.log(
+      `[LOG] (${log.phase}) [${log.step}] → ${log.status.toUpperCase()} (${log.durationMs}ms)`,
+    );
+  }
+}
+// src/core/pipeline/subsystems/service/service-resolver.subsystem.ts
+import { Injectable } from '@nestjs/common';
+
+/**
+ * Este subsistema actúa como contenedor de servicios accesibles desde steps.
+ * Permite registrar (registrar<T>(Clase, instancia)) servicios NestJS
+ * y luego resolverlos con resolve<T>(Clase).
+ */
+@Injectable()
+export class ServiceResolverSubsystem {
+  private services = new Map<new (...args: any[]) => any, any>();
+
+  /**
+   * Registrar un servicio bajo su clase (token).
+   * Ejemplo: resolver.register(PlansService, this.plansServiceInstance)
+   */
+  register<T>(token: new (...args: any[]) => T, instance: T): void {
+    this.services.set(token, instance);
+  }
+
+  /**
+   * Recuperar un servicio previamente registrado.
+   * Ejemplo: const plans = resolver.resolve(PlansService)
+   */
+  resolve<T>(token: new (...args: any[]) => T): T | undefined {
+    return this.services.get(token);
+  }
+
+  /**
+   * Limpiar todos los servicios registrados (al terminar la petición).
+   */
+  clear(): void {
+    this.services.clear();
+  }
+}
+/**
+ * Evalúa una expresión JS segura contra el RequestContext.
+ *  - Si la expresión está vacía → true.
+ *  - Si ocurre un error → false.
+ *  - Solo permite acceder a la variable ‘context’.
+ */
+export function evaluateCondition(expr: string | undefined, context: any): boolean {
+  if (!expr) return true;
+
+  try {
+    /* Evitamos palabras potencialmente peligrosas – very simple guard */
+    const blacklist = ['process', 'require', 'global', 'fs', 'eval'];
+    if (blacklist.some((kw) => expr.includes(kw))) return false;
+
+    // Creamos una función aislada que recibe “context”
+    const fn = new Function('context', `return (${expr});`);
+    return Boolean(fn(context));
+  } catch (e) {
+    console.warn(`[Pipeline][Condition] Error evaluando "${expr}": ${e}`);
+    return false;
+  }
+}
+// src/pipeline/decorators/pipeline.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const USE_PIPELINE_KEY = 'USE_PIPELINE';
+export const SKIP_PIPELINE_KEY = 'SKIP_PIPELINE';
+
+/**
+ * @UsePipeline('NombrePipeline')
+ */
+export const UsePipeline = (name: string) =>
+  SetMetadata(USE_PIPELINE_KEY, name);
+
+/**
+ * @SkipPipeline()
+ */
+export const SkipPipeline = () =>
+  SetMetadata(SKIP_PIPELINE_KEY, true);
+// src/pipeline/decorators/step-definition.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+import { PipelinePhase } from '../interfaces/pipeline-step.interface';
+
+export interface StepMetadata {
+  name: string;
+  phase: PipelinePhase;
+  injects?: string[]; // nombres de subsistemas que el step necesita
+}
+
+export const STEP_METADATA_KEY = 'STEP_METADATA';
+
+export function StepDefinition(meta: StepMetadata): ClassDecorator {
+  return SetMetadata(STEP_METADATA_KEY, meta);
+}
+
+export function getStepMetadata(target: any): StepMetadata | undefined {
+  return Reflect.getMetadata(STEP_METADATA_KEY, target);
+}
+// src/pipeline/extensions/pipeline-extensions.module.ts
+import { Module, Global, forwardRef } from '@nestjs/common';
+import { PipelineCoreModule } from '../core/pipeline-core.module';
+
+import { STEP_REGISTRY } from './steps/step-registry';
+
+@Global()
+@Module({
+  imports: [
+    // Si algún día un hook quisiera inyectar algo del core
+    forwardRef(() => PipelineCoreModule),
+  ],
+  providers: [
+    {
+      provide: 'STEP_REGISTRY',
+      useValue: STEP_REGISTRY,
+    },
+  ],
+  exports: ['STEP_REGISTRY'],
+})
+export class PipelineExtensionsModule {}
+// src/pipeline/steps/base-step.ts
+
+import { ContextSubsystem } from "../../core/subsystems/context/context.subsystem";
+import { StepDefinition } from "../../decorators/step-definition.decorator";
+import { StepExecutionLog } from "../../interfaces/context.interface";
+import { PipelinePhase, PipelineStep, StepConfig } from "../../interfaces/pipeline-step.interface";
+
+
+@StepDefinition({
+  name: 'BaseGenericStep',
+  phase: PipelinePhase.PRE, // este valor es irrelevante en la práctica; cada subclase lo overridea
+  injects: ['ContextSubsystem'],
+})
+export abstract class BaseGenericStep implements PipelineStep {
+  config: StepConfig = { onError: 'continue' };
+
+  protected readonly ctx: ContextSubsystem;
+
+  constructor(ctx: ContextSubsystem) {
+    this.ctx = ctx;
+  }
+
+  /** Nombre textual del paso. Cada subclase sobreescribe. */
+  abstract getName(): string;
+
+  /** Fase a la que pertenece: PRE | PROCESSING | POST. */
+  abstract getPhase(): PipelinePhase;
+
+  public async execute(): Promise<void> {
+    // 1) Tomar el RequestContext
+    const context = this.ctx.getContext();
+    if (!context) {
+      // Si no existe contexto, simplemente retornamos (no podemos avanzar).
+      throw new Error(`[${this.getName()}] Contexto no encontrado`);
+    }
+
+    // 2) Iniciar medición de tiempo
+    const start = Date.now();
+
+    // 3) Placeholder: aquí cada subclase puede ejecutar LÓGICA real o extender.
+    //    En esta implementación base no hay lógica de negocio: queda para la subclase.
+    //    Ejemplo: await this.doWork(requestId);
+
+    // 4) Calcular duración
+    const duration = Date.now() - start;
+
+    // 5) Push al log de ejecución
+    const logEntry: StepExecutionLog = {
+      phase: this.getPhase(),
+      step: this.getName(),
+      status: 'success',
+      durationMs: duration,
+    };
+    context.meta.logs.push(logEntry);
+
+    // 6) Imprimir en consola para debugging
+    console.log(
+      `[${this.getName()}] (${this.getPhase()} → OK (${duration} ms)`
+    );
+  }
+}
+// src/pipeline/steps/business-audit.step.ts
+
+import { ContextSubsystem } from "../../core/subsystems/context/context.subsystem";
+import { StepDefinition } from "../../decorators/step-definition.decorator";
+import { PipelinePhase } from "../../interfaces/pipeline-step.interface";
+import { BaseGenericStep } from "./base-step";
+
+
+interface BusinessAuditEntry {
+  action: string;
+  step: string;
+  time: number;
+  payload: any;
+}
+
+@StepDefinition({
+  name: 'BusinessAuditStep',
+  phase: PipelinePhase.PROCESSING,
+  injects: ['ContextSubsystem'],
+})
+export class BusinessAuditStep extends BaseGenericStep {
+  // Si falla algo, continuamos (no es crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'BusinessAuditStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PROCESSING;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Crear lista si no existe
+    if (!Array.isArray(context.meta.businessAudit)) {
+      context.meta.businessAudit = [];
+    }
+
+    // 2) Construir entrada de auditoría
+    const entry: BusinessAuditEntry = {
+      action: 'BusinessAudit',
+      step: this.getName(),
+      time: Date.now(),
+      payload: context.meta.processedBody ?? null,
+    };
+    context.meta.businessAudit.push(entry);
+
+    // 3) También podemos imprimir por consola
+    console.log(`[BusinessAuditStep] Audit entry`, entry);
+
+    // 4) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/context-builder.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'ContextBuilderStep',
+  phase: PipelinePhase.PROCESSING,
+  injects: ['ContextSubsystem'],
+})
+export class ContextBuilderStep extends BaseGenericStep {
+  // Continuamos aun si hay algún detalle (no crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'ContextBuilderStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PROCESSING;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Timestamp de recepción
+    context.meta.requestReceivedAt = new Date().toISOString();
+    // 2) Correlation ID = requestId
+    // 3) Copiar “processedBody” para facilitar uso posterior
+    context.meta.processedBody = context.meta.normalizedBody ?? context.meta.validatedBody ?? context.body;
+
+    // 4) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/header-check.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'HeaderCheckStep',
+  phase: PipelinePhase.PRE,
+  injects: ['ContextSubsystem'],
+})
+export class HeaderCheckStep extends BaseGenericStep {
+  // Queremos detener el pipeline si falla la validación
+  config = { onError: 'stop' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'HeaderCheckStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PRE;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Verificar que haya header "content-type" conteniendo "application/json"
+    const contentType = context.headers['content-type'] as string | undefined;
+    if (!contentType || !contentType.includes('application/json')) {
+      throw new Error('[HeaderCheckStep] Falta header "content-type: application/json"');
+    }
+
+    // 2) Podemos chequear también que venga un header "x-tenant" (opcional)
+    const tenant = context.headers['x-tenant'];
+    if (!tenant) {
+      // Si no hay x-tenant, usamos “default”, pero no lanzamos error.  
+      context.meta.tenant = 'default';
+    } else {
+      context.meta.tenant = String(tenant);
+    }
+
+    // 3) Llamamos al base para registrar log de éxito
+    await super.execute();
+  }
+}
+// apps/api-core/src/core/pipeline/steps/index.ts
+
+export * from './business-audit.step';
+export * from './context-builder.step';
+export * from './header-check.step';
+export * from './logging-step';
+export * from './metadata-tagger.step';
+export * from './noop-step';
+export * from './normalizer.step';
+export * from './notifier.step';
+export * from './rate-limiter.step';
+export * from './response-formatter-step';
+export * from './token-parser.step';
+export * from './tracer.step';
+export * from './validation.step';
+// …y así con cada archivo de step que tengas…
+// src/pipeline/steps/logging-step.ts
+
+import { ContextSubsystem } from "../../core/subsystems/context/context.subsystem";
+import { StepDefinition } from "../../decorators/step-definition.decorator";
+import { PipelinePhase, PipelineStep, StepConfig } from "../../interfaces/pipeline-step.interface";
+
+
+@StepDefinition({
+  name: 'LoggingStep',
+  phase: PipelinePhase.PRE,
+  injects: ['ContextSubsystem'],
+})
+export class LoggingStep implements PipelineStep {
+  config: StepConfig = { onError: 'continue' };
+  constructor(private readonly contextService: ContextSubsystem) {}
+
+  async execute(): Promise<void> {
+    const ctx = this.contextService.getContext();
+    if (ctx) {
+      console.log(`[LoggingStep] ─ Body:`, ctx.body);
+    } else {
+      console.warn(`[LoggingStep] ─ Context not found.`);
+    }
+  }
+}
+// src/pipeline/steps/metadata-tagger.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'MetadataTaggerStep',
+  phase: PipelinePhase.POST,
+  injects: ['ContextSubsystem'],
+})
+export class MetadataTaggerStep extends BaseGenericStep {
+  // Si algo falla aquí, continuamos (no es crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'MetadataTaggerStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.POST;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Agregar tags genéricos a context.meta
+    context.meta.responseTags = {
+      version: '1.0',
+      env: process.env.NODE_ENV ?? 'dev',
+      taggedAt: new Date().toISOString(),
+    };
+
+    // 2) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/noop-step.ts
+
+import { ContextSubsystem } from "../../core/subsystems/context/context.subsystem";
+import { StepDefinition } from "../../decorators/step-definition.decorator";
+import { PipelinePhase, PipelineStep, StepConfig } from "../../interfaces/pipeline-step.interface";
+
+
+@StepDefinition({
+  name: 'NoOpStep',
+  phase: PipelinePhase.PROCESSING,
+  injects: ['ContextSubsystem'],
+})
+export class NoOpStep implements PipelineStep {
+  config: StepConfig = { onError: 'continue' };
+
+  constructor(private readonly contextService: ContextSubsystem) {}
+
+  async execute(): Promise<void> {
+    // No hace nada, solo simula un paso
+    console.log(`[NoOpStep] ─ NoOp ejecutado`);
+  }
+}
+// src/pipeline/steps/normalizer.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'NormalizerStep',
+  phase: PipelinePhase.PROCESSING,
+  injects: ['ContextSubsystem'],
+})
+export class NormalizerStep extends BaseGenericStep {
+  // Si hay error de tipado o similar, el pipeline continúa (no es crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'NormalizerStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PROCESSING;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Tomamos el objeto a normalizar
+    const source = context.meta.validatedBody ?? context.body;
+    if (typeof source === 'object' && source !== null) {
+      const normalized: any = {};
+      for (const [key, value] of Object.entries(source)) {
+        if (typeof value === 'string') {
+          // trim y lowercase
+          normalized[key] = value.trim().toLowerCase();
+        } else {
+          normalized[key] = value;
+        }
+      }
+      context.meta.normalizedBody = normalized;
+    } else {
+      // No hay nada válido que normalizar
+      context.meta.normalizedBody = source;
+    }
+
+    // 2) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/notifier.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+interface NotificationEntry {
+  message: string;
+  time: number;
+}
+
+@StepDefinition({
+  name: 'NotifierStep',
+  phase: PipelinePhase.POST,
+  injects: ['ContextSubsystem'],
+})
+export class NotifierStep extends BaseGenericStep {
+  // Si falla la notificación, continuamos (no es crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'NotifierStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.POST;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Simular envío de notificación (console.log)
+    const msg = `Notificación placeholder`;
+    console.log(`[NotifierStep] ${msg}`);
+
+    // 2) Push en context.meta.notifications
+    if (!Array.isArray(context.meta.notifications)) {
+      context.meta.notifications = [];
+    }
+    const notification: NotificationEntry = {
+      message: msg,
+      time: Date.now(),
+    };
+    context.meta.notifications.push(notification);
+
+    // 3) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/rate-limiter.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'RateLimiterStep',
+  phase: PipelinePhase.PRE,
+  injects: ['ContextSubsystem'],
+})
+export class RateLimiterStep extends BaseGenericStep {
+  // Detener el pipeline si supera el límite
+  config = { onError: 'stop' as const };
+
+  // Mapa estático: key = identificador (IP o tenant), value = array de timestamps (ms)
+  private static requestsMap: Map<string, number[]> = new Map();
+
+  private readonly WINDOW_MS = 60_000; // 1 minuto
+  private readonly MAX_REQUESTS = 10; // máximo 10 requests por ventana
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'RateLimiterStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PRE;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Determinar “identificador” de rate-limiting: primero IP, luego tenant, sino "global"
+    let key: string = 'global';
+    if (context.headers['x-forwarded-for']) {
+      // usar primera IP de x-forwarded-for
+      key = String(context.headers['x-forwarded-for']).split(',')[0].trim();
+    } else if (context.meta.tenant) {
+      key = String(context.meta.tenant);
+    }
+
+    // 2) Obtener timestamps viejos y filtrar solo los de la “ventana” actual
+    const now = Date.now();
+    const windowStart = now - this.WINDOW_MS;
+    const timestamps = RateLimiterStep.requestsMap.get(key) || [];
+    const filtered = timestamps.filter((ts) => ts >= windowStart);
+
+    // 3) Verificar si ya excede
+    if (filtered.length >= this.MAX_REQUESTS) {
+      throw new Error(`[RateLimiterStep] Límite excedido para key="${key}" (más de ${this.MAX_REQUESTS} req/min)`);
+    }
+
+    // 4) Agregar timestamp actual y guardar en el mapa
+    filtered.push(now);
+    RateLimiterStep.requestsMap.set(key, filtered);
+
+    // 5) Continuar y registrar log
+    await super.execute();
+  }
+}
+// src/pipeline/steps/response-formatter-step.ts
+
+import { ContextSubsystem } from "../../core/subsystems/context/context.subsystem";
+import { StepDefinition } from "../../decorators/step-definition.decorator";
+import { PipelinePhase, PipelineStep } from "../../interfaces/pipeline-step.interface";
+
+
+@StepDefinition({
+  name: 'ResponseFormatterStep',
+  phase: PipelinePhase.POST,
+  injects: ['ContextSubsystem'],
+})
+export class ResponseFormatterStep implements PipelineStep {
+  name = 'ResponseFormatterStep';
+  phase = PipelinePhase.POST;
+  config = { onError: 'continue' as const };
+
+  constructor(private readonly contextService: ContextSubsystem) {}
+
+  async execute(): Promise<void> {
+    const ctx = this.contextService.getContext();
+    if (!ctx) throw new Error('[ResponseFormatterStep] Contexto no encontrado');
+
+    const duration = Date.now() - Number(ctx.requestId.replace('REQ-', ''));
+    ctx.response = {
+      success: true,
+      requestId: ctx.requestId,
+      timestamp: new Date().toISOString(),
+      durationMs: duration,
+      result: ctx.meta.validatedBody ?? {},
+      logs: ctx.meta.logs,
+    };
+  }
+}
+// src/pipeline/steps/step-registry.ts
+
+// Importa aquí todas las clases de Steps que quieres exponer en la fábrica:
+import { LoggingStep } from './logging-step';
+import { NoOpStep } from './noop-step';
+import { ResponseFormatterStep } from './response-formatter-step';
+
+import { HeaderCheckStep } from './header-check.step';
+import { RateLimiterStep } from './rate-limiter.step';
+import { TokenParserStep } from './token-parser.step';
+import { ValidationStep } from './validation.step';
+import { NormalizerStep } from './normalizer.step';
+import { ContextBuilderStep } from './context-builder.step';
+import { BusinessAuditStep } from './business-audit.step';
+import { MetadataTaggerStep } from './metadata-tagger.step';
+import { NotifierStep } from './notifier.step';
+import { TracerStep } from './tracer.step';
+import { PipelineStepConstructor } from '../../interfaces/pipeline-step.interface';
+
+// Mapea cada name (igual al “name” de @StepDefinition) a su clase:
+export const STEP_REGISTRY: Record<string, PipelineStepConstructor> = {
+  // Steps “core” que ya existían:
+  'LoggingStep': LoggingStep,
+  'NoOpStep': NoOpStep,
+  'ResponseFormatterStep': ResponseFormatterStep,
+
+  // Steps genéricos Fase 3:
+  'HeaderCheckStep': HeaderCheckStep,
+  'RateLimiterStep': RateLimiterStep,
+  'TokenParserStep': TokenParserStep,
+  'ValidationStep': ValidationStep,
+  'NormalizerStep': NormalizerStep,
+  'ContextBuilderStep': ContextBuilderStep,
+  'BusinessAuditStep': BusinessAuditStep,
+  'MetadataTaggerStep': MetadataTaggerStep,
+  'NotifierStep': NotifierStep,
+  'TracerStep': TracerStep,
+
+  // Si luego agregas pasos de Planes/ACL, inclúyelos aquí:
+  // 'PlanPermissionsStep': PlanPermissionsStep,
+  // 'PlanAccessGuardStep': PlanAccessGuardStep,
+};
+// src/pipeline/steps/token-parser.step.ts
+
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+import * as jwt from 'jsonwebtoken';
+
+@StepDefinition({
+  name: 'TokenParserStep',
+  phase: PipelinePhase.PRE,
+  injects: ['ContextSubsystem'],
+})
+export class TokenParserStep extends BaseGenericStep {
+  // Si falla la verificación del token, detenemos el pipeline
+  config = { onError: 'stop' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'TokenParserStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PRE;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Obtener header Authorization
+    const authHeader = context.headers['authorization'] as string | undefined;
+    if (!authHeader) {
+      // No hay token: dejamos context.user como null y continuamos
+      context.user = null;
+      await super.execute();
+      return;
+    }
+
+    // 2) Debe tener formato "Bearer <token>"
+    const parts = authHeader.split(' ');
+    if (parts.length !== 2 || parts[0].toLowerCase() !== 'bearer') {
+      throw new Error('[TokenParserStep] Formato de Authorization inválido. Debe ser "Bearer <token>".');
+    }
+    const token = parts[1];
+
+    // 3) Intentar verificar si existe JWT_SECRET
+    const secret = process.env.JWT_SECRET;
+    if (secret) {
+      try {
+        const payload = jwt.verify(token, secret);
+        context.user = payload;
+        context.meta.tokenPayload = payload;
+      } catch (err: any) {
+        throw new Error(`[TokenParserStep] JWT inválido o expirado: ${err.message}`);
+      }
+    } else {
+      // Si no hay secreto, hacemos decode “sin verificar” (ojo: no es seguro en prod)
+      const payload = jwt.decode(token);
+      context.user = payload as any;
+      context.meta.tokenPayload = payload;
+    }
+
+    // 4) Registramos log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/tracer.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+interface TraceEntry {
+  step: string;
+  timestamp: number;
+}
+
+@StepDefinition({
+  name: 'TracerStep',
+  phase: PipelinePhase.POST,
+  injects: ['ContextSubsystem'],
+})
+export class TracerStep extends BaseGenericStep {
+  // Si falla, continuamos (no crítico)
+  config = { onError: 'continue' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'TracerStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.POST;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) Inicializar array de trazas si no existe
+    if (!Array.isArray(context.meta.traceSteps)) {
+      context.meta.traceSteps = [];
+    }
+
+    // 2) Agregar un entry de trazo
+    const entry: TraceEntry = {
+      step: this.getName(),
+      timestamp: Date.now(),
+    };
+    context.meta.traceSteps.push(entry);
+
+    // 3) También imprimir un console.log
+    console.log(`[TracerStep] Se añadió trazo:`, entry);
+
+    // 4) Log de éxito
+    await super.execute();
+  }
+}
+// src/pipeline/steps/validation.step.ts
+import { ContextSubsystem } from '../../core/subsystems/context/context.subsystem';
+import { StepDefinition } from '../../decorators/step-definition.decorator';
+import { PipelinePhase } from '../../interfaces/pipeline-step.interface';
+import { BaseGenericStep } from './base-step';
+
+@StepDefinition({
+  name: 'ValidationStep',
+  phase: PipelinePhase.PROCESSING,
+  injects: ['ContextSubsystem'],
+})
+export class ValidationStep extends BaseGenericStep {
+  // Si falta body o no es objeto, detenemos el pipeline
+  config = { onError: 'stop' as const };
+
+  constructor(ctx: ContextSubsystem) {
+    super(ctx);
+  }
+
+  getName(): string {
+    return 'ValidationStep';
+  }
+
+  getPhase(): PipelinePhase {
+    return PipelinePhase.PROCESSING;
+  }
+
+  public async execute(): Promise<void> {
+    const context = this.ctx.getContext()!;
+
+    // 1) context.body debe existir y ser un objeto
+    if (
+      context.body === null ||
+      context.body === undefined ||
+      typeof context.body !== 'object' ||
+      Array.isArray(context.body)
+    ) {
+      throw new Error('[ValidationStep] El cuerpo de la petición debe ser un objeto JSON.');
+    }
+
+    // 2) Debe tener por lo menos una propiedad
+    if (Object.keys(context.body).length === 0) {
+      throw new Error('[ValidationStep] El body no puede estar vacío.');
+    }
+
+    // 3) OK: guardamos validatedBody
+    context.meta.validatedBody = { ...context.body };
+
+    // 4) Registrar log de éxito
+    await super.execute();
+  }
+}
+import { Module, forwardRef } from '@nestjs/common';
+
+/* ─── Motor + subsistemas ─── */
+import { PipelineCoreModule } from '../core/pipeline-core.module';
+
+/* ─── Nueva fábrica basada en JSON ─── */
+import { FrameworkPipelineFactory } from '../core/factory/framework-pipeline.factory';
+
+@Module({
+  imports: [
+    /* Asegura que los subsistemas que la factory inyecta estén disponibles */
+    forwardRef(() => PipelineCoreModule),
+  ],
+  providers: [
+    {
+      provide: 'PIPELINE_FACTORY',
+      useClass: FrameworkPipelineFactory,   // 👈 aquí el cambio clave
+    },
+  ],
+  exports: ['PIPELINE_FACTORY'],
+})
+export class PipelineFactoryModule {}
+// src/pipeline/interceptors/pipeline.interceptor.ts
+import {
+  CallHandler,
+  ExecutionContext,
+  Injectable,
+  NestInterceptor,
+  Inject,
+} from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { Observable, from, switchMap } from 'rxjs';
+import { USE_PIPELINE_KEY, SKIP_PIPELINE_KEY } from '../decorators/pipeline.decorator';
+import { PipelineEngineService } from '../core/pipeline-engine.service';
+import { RequestContext } from '../interfaces/context.interface';
+import { PipelineFactory } from '../interfaces/pipeline-factory.interface';
+
+@Injectable()
+export class PipelineInterceptor implements NestInterceptor {
+  constructor(
+    private readonly reflector: Reflector,
+    @Inject('PIPELINE_FACTORY') private readonly pipelineFactory: PipelineFactory,
+    private readonly engine: PipelineEngineService,
+  ) {}
+
+  intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
+    const handler = context.getHandler();
+    const skip = this.reflector.get<boolean>(SKIP_PIPELINE_KEY, handler);
+    if (skip) {
+      return next.handle();
+    }
+
+    const pipelineName =
+      this.reflector.get<string>(USE_PIPELINE_KEY, handler) || 'default';
+
+    const http = context.switchToHttp();
+    const request = http.getRequest();
+    const requestId = `REQ-${Date.now()}`;
+
+    // Construir RequestContext nuevo:
+    const requestContext: RequestContext = {
+      requestId,
+      body: request.body,
+      headers: request.headers,
+      user: request.user,
+      meta: { logs: [] },
+      services: {},
+    };
+
+    // Observable que ejecuta el pipeline según tenant y lo inyecta antes del controller:
+    const pipeline$ = from(
+      this.pipelineFactory
+        .getPipeline(pipelineName, requestContext)   // <-- le pasamos el context
+        .then((steps: any) => this.engine.executeWithSteps(requestContext, steps))
+        .then(() => {
+          request.pipelineContext = requestContext;  // asignamos antes de seguir
+        })
+    );
+
+    return pipeline$.pipe(
+      switchMap(() => next.handle())
+    );
+  }
+}
+// src/pipeline/interfaces/context.interface.ts
+
+export interface StepExecutionLog {
+  phase: string;
+  step: string;
+  status: 'success' | 'error' | 'skipped';
+  durationMs: number;
+  details?: any;
+}
+
+export interface RequestContext {
+  requestId: string;
+  body: any;
+  headers: Record<string, any>;
+  user?: any;
+  result?: any;
+  errors?: any[];
+  response?: any;
+  // Cualquier dato extra que necesiten los Steps
+  services?: Record<string, any>;
+  // Metadatos internos: logs de steps, validaciones, permisos, etc.
+  meta: {
+    logs: StepExecutionLog[];
+    [key: string]: any;
+  };
+}
+// src/pipeline/factory/pipeline-factory.interface.ts
+import { PipelinePhase, PipelineStep } from '../interfaces/pipeline-step.interface';
+import { RequestContext } from '../interfaces/context.interface';
+
+export interface PipelineFactory {
+  /**
+   * Devuelve un mapa { pre: PipelineStep[], processing: PipelineStep[], post: PipelineStep[] }
+   * ESTÁNDAR: recibe el nombre del pipeline y el context, para que lea config por tenant.
+   */
+  getPipeline(
+    name: string,
+    context: RequestContext
+  ): Promise<Record<PipelinePhase, PipelineStep[]>>;
+
+  /**
+   * Pipeline fallback mínimo si nada más aplica.
+   */
+  getDefaultPipeline(
+    context: RequestContext
+  ): Promise<Record<PipelinePhase, PipelineStep[]>>;
+}
+// src/pipeline/interfaces/pipeline-step.interface.ts
+export type PhaseName = string;          // ← añadido
+
+export interface StepConfig {
+  async?: boolean;
+  parallelizable?: boolean;
+  blocking?: boolean;
+  critical?: boolean;
+  onError?: 'continue' | 'stop' | 'skip' | 'retry';
+}
+
+export enum PipelinePhase {
+  PRE = 'pre',
+  PROCESSING = 'processing',
+  POST = 'post',
+}
+
+export interface PipelineStep {
+  execute(): Promise<void>;
+  config?: StepConfig;
+}
+
+// Para poder instanciar Steps dinámicamente
+export interface PipelineStepConstructor {
+  new (...args: any[]): PipelineStep;
+}
+// apps/api-core/src/testing/controllers/demo.controller.ts
+import { Controller, Post, Req, Res } from '@nestjs/common';
+import { UsePipeline } from '../../pipeline/decorators/pipeline.decorator';
+import { Request, Response } from 'express';
+
+@Controller('testing')
+export class DemoController {
+  @UsePipeline('default')
+  @Post('demo-generico')
+  async runDemo(
+    @Req() request: Request, 
+    @Res() response: Response
+  ) {
+    return response.json(request.pipelineContext.response);
+  }
+}
+// src/testing/controllers/test-noop.controller.ts
+import { Controller, Post, Body } from '@nestjs/common';
+import { UsePipeline } from '../../pipeline/decorators/pipeline.decorator';
+
+@Controller('test/noop')
+export class TestNoOpController {
+  @Post()
+  @UsePipeline('NoOpPipeline')
+  testNoOp(@Body() body: any) {
+    return {
+      ok: true,
+      mensaje: '✅ Ejecutado con NoOpPipeline',
+      received: body,
+    };
+  }
+}
+// src/testing/controllers/test-plan-access.controller.ts
+import { Controller, Post, Body } from '@nestjs/common';
+import { UsePipeline } from '../../pipeline/decorators/pipeline.decorator';
+
+class TestPlanAccessDto {
+  planId: string = 'basic';
+  feature: string = 'featureA';
+}
+
+@Controller('test/plan-access')
+@UsePipeline('TestPlanAccessPipeline')
+export class TestPlanAccessController {
+  @Post()
+  test(@Body() body: TestPlanAccessDto) {
+    // Si llegamos aquí, significa que el pipeline permitió el acceso
+    return { source: body };
+  }
+}
+// src/testing/services/pipeline-test-runner.service.ts
+import { Injectable, Inject } from '@nestjs/common';
+import { StepExecutionLog, RequestContext } from '../../pipeline/interfaces/context.interface';
+import { PipelineEngineService } from '../../pipeline/core/pipeline-engine.service';
+import { ServiceResolverSubsystem } from '../../pipeline/core/subsystems/service/service-resolver.subsystem';
+import { ContextSubsystem } from '../../pipeline/core/subsystems/context/context.subsystem';
+
+@Injectable()
+export class PipelineTestRunnerService {
+  constructor(
+    private readonly engine: PipelineEngineService,
+    private readonly contextService: ContextSubsystem,
+    private readonly serviceResolver: ServiceResolverSubsystem,
+    @Inject('PIPELINE_FACTORY') private readonly factory: any,
+  ) {}
+
+  async run(pipelineName: string, input: any) {
+    const requestId = `TEST-${Date.now()}`;
+    // Construir contexto manual
+    const context: RequestContext = {
+      requestId,
+      body: input,
+      headers: {},
+      user: { id: 'u1', email: 'a@b.com', plan: 'basic', permissions: [] },
+      meta: { logs: [] },
+      services: {},
+    };
+    // Si necesitan un servicio, lo registran manualmente:
+    // this.serviceResolver.register(PlansService, <instanciaPlansService>);
+    context.services = {
+      // p. ej. PlansService: instancia,
+    };
+
+    // Obtener pipeline
+    const steps = await this.factory.getPipeline(pipelineName);
+    // Ejecutar
+    await this.engine.executeWithSteps(context, steps);
+
+    return {
+      response: context.response,
+      logs: context.meta.logs as StepExecutionLog[],
+      errors: context.errors,
+    };
+  }
+}
+// apps/api-core/src/testing/testing.module.ts
+import { Module } from '@nestjs/common';
+
+/* ── Importa los dos módulos reorganizados ── */
+import { PipelineCoreModule } from '../pipeline/core/pipeline-core.module';
+import { PipelineExtensionsModule } from '../pipeline/extensions/pipeline-extensions.module';
+
+/* Controllers de prueba existentes */
+import { TestNoOpController } from './controllers/test-noop.controller';
+import { TestPlanAccessController } from './controllers/test-plan-access.controller';
+import { DemoController } from './controllers/demo.controller';
+
+/* (Opcional) servicios de test - si los usas */
+import { PipelineTestRunnerService } from './services/pipeline-test-runner.service';
+import { PipelineFactoryModule } from '../pipeline/factory/pipeline-factory.module';
+
+@Module({
+  imports: [
+    /* Motor + pasos */
+    PipelineCoreModule,
+    PipelineExtensionsModule,
+    PipelineFactoryModule,
+  ],
+  controllers: [
+    TestNoOpController,
+    TestPlanAccessController,
+    DemoController,
+  ],
+  providers: [
+    PipelineTestRunnerService,  // si lo usas
+  ],
+  exports: [
+    PipelineTestRunnerService,
+  ],
+})
+export class TestingModule {}
+// src/types/express.d.ts
+import { RequestContext } from '../pipeline/interfaces/context.interface';
+
+declare module 'express' {
+  export interface Request {
+    pipelineContext: RequestContext;
+  }
+}
