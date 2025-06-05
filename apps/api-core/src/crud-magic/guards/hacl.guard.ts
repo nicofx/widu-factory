@@ -1,13 +1,16 @@
-// crud-magic/src/guards/hacl.guard.ts
-
 import { Injectable, ForbiddenException, SetMetadata, CanActivate, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { HaclService } from '../services/hacl.service';
+import { HaclService } from '../services/hacl.service';  // Ajusta ruta si fuese distinto
 
+/**
+ * Clave que usará el decorador @Hacl() para guardar metadata en cada endpoint.
+ */
 export const HACL_KEY = 'HACL_PERMISSION';
 
 /**
- * @Hacl('users.read')  ⇒ guarda metadata HACL_KEY = 'users.read'
+ * Decorador que aplicas en tu controlador:
+ * @Hacl('{entity}.read') 
+ *  → guarda, en el metadata de Nest, la clave HACL_KEY = '{entity}.read'
  */
 export function Hacl(permissionKey: string): MethodDecorator {
   return SetMetadata(HACL_KEY, permissionKey);
@@ -21,6 +24,7 @@ export class HaclGuard implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    // Aquí recupera el permissionKey con la misma HACL_KEY
     const permiso: string | undefined =
       this.reflector.get<string>(HACL_KEY, context.getHandler());
     if (!permiso) {

@@ -1,0 +1,1766 @@
+// crud-magic/src/controllers/base-crud.controller.ts
+
+import {
+  Controller,
+  Get,
+  Post,
+  Patch,
+  Delete,
+  Body,
+  Param,
+  Query,
+  Headers,
+  UseGuards,
+  UseInterceptors,
+  Req,
+  Res,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+import { BaseCrudService } from '../services/base-crud.service';
+import { RateLimitGuard } from '../guards/rate-limit.guard';
+import { Crud } from '../decorators/crud.decorator';
+import { PaginationOptions } from '../interfaces/pagination.interface';
+import { FilteringService, PaginationService, SortingService } from '../services';
+import { Hacl, HaclGuard } from '../guards';
+
+/**
+ * BaseCrudController
+ *
+ * Controlador dinámico que expone las rutas automáticas CRUD para una entidad:
+ *
+ *  GET    /<entidad>          → findAll
+ *  GET    /<entidad>/:id      → findOne
+ *  POST   /<entidad>          → create
+ *  PATCH  /<entidad>/:id      → update
+ *  DELETE /<entidad>/:id      → delete
+ *
+ * Opcionalmente:
+ *  POST   /<entidad>/bulk-create   → bulkCreate
+ *  PATCH  /<entidad>/bulk-update   → bulkUpdate
+ *  GET    /<entidad>/export-csv    → exportCsv
+ *  POST   /<entidad>/import-csv    → importCsv
+ *
+ * Usa:
+ *  - RateLimitGuard (plugin interno)
+ *  - Métodos de BaseCrudService
+ *
+ * Sprint X: cada método invocará al servicio, manejará query params y encabezados (tenantId, user).
+ */
+@Crud() // Decorador para inyectar metadata si es necesario
+@Controller() // La ruta base se especifica dinámicamente (ver Factory en CrudMagicModule)
+export class BaseCrudController {
+  constructor(
+    private readonly entityName: string,
+    private readonly service: BaseCrudService,
+    private readonly filteringService: FilteringService,
+    private readonly sortingService: SortingService,
+    private readonly paginationService: PaginationService,
+  ) {}
+
+  /**
+   * GET /<entidad>?page=&limit=&sort=&filters…
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.read') // se reemplazará en tiempo de ejecución por el nombre real
+  @Get()
+  @HttpCode(HttpStatus.OK)
+  async findAll(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Query() query: any,
+  ) {
+    // 1) Tenant por defecto si falta
+    const t = tenantId?.trim() || 'default';
+    // 2) Usuario (payload JWT) inyectado por JwtAuthGuard / TokenParserStep
+    const user = req.user;
+    // 3) Armar filtro a partir del query
+    const filterCriteria = this.filteringService.buildFilter(query);
+    // 4) Armar ordenamiento
+    const sortCriteria = this.sortingService.buildSort(query);
+    // 5) Armar paginación
+    const { skip, limit, page } = this.paginationService.parse(query);
+
+    // 6) Combinar con regla HACL (si HACL devolviera filtros adicionales),
+    //    en caso de que quisieras hacer algo como “solo ver mis propios registros”:
+    //    const haclFilter = await this.haclService.getAllowedFilter(t, user, `${this.entityName}.read`);
+    //    finalFilter = { ...haclFilter, ...filterCriteria }
+
+    // 7) Ejecutar consulta
+    const [data, total] = await this.service.findAll(
+      t,
+      user,
+      filterCriteria,
+      sortCriteria,
+      skip,
+      limit,
+    );
+
+    // 8) Envolver respuesta con meta
+    return res.json({
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        elapsedMs: Date.now() - Number((req as any).startTime || Date.now()),
+      },
+    });
+  }
+  
+  /**
+   * GET /<entidad>/:id
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.read') // “<entidad>.read”
+  @Get(':id')
+  @HttpCode(HttpStatus.OK)
+  async findOne(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+
+    // 1) (Opcional) Comprobar HACL para “read” en el service
+    //    En checkPermission ya lo hizo el guard, así que aquí suponemos OK.
+
+    const item = await this.service.findOne(t, user, id);
+    return res.json(item);
+  }
+
+  /**
+   * POST /<entidad>
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.create')
+  @Post()
+  @HttpCode(HttpStatus.CREATED)
+  async create(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Body() dto: any,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+
+    // La validación de HACL para “create” ya la hizo el guard.
+    const created = await this.service.create(t, user, dto);
+    return res.status(HttpStatus.CREATED).json(created);
+  }
+
+  /**
+   * PATCH /<entidad>/:id
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.update')
+  @Patch(':id')
+  @HttpCode(HttpStatus.OK)
+  async update(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Param('id') id: string,
+    @Body() dto: any,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+
+    const updated = await this.service.update(t, user, id, dto);
+    return res.json(updated);
+  }
+
+  /**
+   * DELETE /<entidad>/:id
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.delete')
+  @Delete(':id')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async delete(
+    @Req() req: Request,
+    @Headers('x-tenant-id') tenantId: string,
+    @Param('id') id: string,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+
+    await this.service.delete(t, user, id);
+    return; // 204 No Content
+  }
+
+  /**
+   * POST /<entidad>/bulk-create
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.create')
+  @Post('bulk-create')
+  @HttpCode(HttpStatus.CREATED)
+  async bulkCreate(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Body() dtos: any[],
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+    const created = await this.service.bulkCreate(t, user, dtos);
+    return res.status(HttpStatus.CREATED).json(created);
+  }
+
+
+  /**
+   * PATCH /<entidad>/bulk-update
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.update')
+  @Patch('bulk-update')
+  @HttpCode(HttpStatus.OK)
+  async bulkUpdate(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Body() items: { id: string; dto: any }[],
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+    const updated = await this.service.bulkUpdate(t, user, items);
+    return res.json(updated);
+  }
+
+  /**
+   * GET /<entidad>/export-csv
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.read')
+  @Get('export-csv')
+  @HttpCode(HttpStatus.OK)
+  async exportCsv(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Query() filter: any,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+    const csvBuffer = await this.service.exportCsv(t, user, filter);
+    res.setHeader('Content-Type', 'text/csv');
+    return res.send(csvBuffer);
+  }
+
+  /**
+   * POST /<entidad>/import-csv
+   */
+  @UseGuards(RateLimitGuard, HaclGuard)
+  @Hacl('{entity}.create')
+  @Post('import-csv')
+  @HttpCode(HttpStatus.CREATED)
+  async importCsv(
+    @Req() req: Request,
+    @Res() res: Response,
+    @Headers('x-tenant-id') tenantId: string,
+    @Body('csvBuffer') csvBuffer: Buffer,
+  ) {
+    const t = tenantId?.trim() || 'default';
+    const user = req.user;
+    const result = await this.service.importCsv(t, user, csvBuffer);
+    return res.status(HttpStatus.CREATED).json(result);
+  }
+}
+// src/crud-magic/controllers/index.ts
+export * from './base-crud.controller';
+
+// crud-magic/src/crud-magic.module.ts
+
+import { Global, DynamicModule, Module, Provider, Controller, Inject } from '@nestjs/common';
+import { MongooseModule } from '@nestjs/mongoose';
+
+// ── Importar los módulos que exponen los servicios utilizados por HaclService ──
+import { PermissionsModule } from '../modules/permissions/permissions.module';
+import { RolesModule } from '../modules/roles/roles.module';
+import { CacheModule as AppCacheModule } from '../common/cache/cache.module';
+
+// ── Servicios “core” de CrudMagic ──
+import {
+  FilteringService,
+  SortingService,
+  PaginationService,
+  SoftDeleteService,
+  RelationsService,
+  ImportExportService,
+  BulkOpsService,
+  I18nService,
+  MetricsService,
+  HooksService,
+} from './services';
+
+// ── Guards y servicios específicos ──
+import { RateLimitGuard } from './guards/rate-limit.guard';
+import { HaclService } from './services/hacl.service';
+
+// ── Clase base para servicios y controladores ──
+import { BaseCrudService } from './services/base-crud.service';
+import { BaseCrudController } from './controllers/base-crud.controller';
+
+// ── Interfaces ──
+import { EntityFeature } from './interfaces/entity-feature.interface';
+import { CrudMagicOptions } from './interfaces/crud-magic-options.interface';
+
+/**
+ * CrudMagicModule
+ *
+ * Módulo “global” (por @Global) que:
+ *  - En forRoot(): registra opciones globales y proveedores centrales
+ *  - En forFeature(): genera dinámicamente servicios + controladores CRUD por entidad
+ */
+@Global()
+@Module({})
+export class CrudMagicModule {
+  /**
+   * forRoot(options)
+   *
+   * - Registra providers comunes (FilteringService, HaclService, etc.)
+   * - IMPORTA explícitamente PermissionsModule, RolesModule y AppCacheModule,
+   *   porque HaclService necesita PermissionsService, RolesService y CacheService en su constructor.
+   */
+  static forRoot(options: CrudMagicOptions): DynamicModule {
+    const optionsProvider: Provider = {
+      provide: 'CRUD_MAGIC_OPTIONS',
+      useValue: options,
+    };
+
+    return {
+      module: CrudMagicModule,
+      imports: [
+        // MongooseModule importado “a secas” para permitir esquemas dinámicos en forFeature
+        MongooseModule,
+        // Estos tres módulos exponen los servicios que HaclService inyecta:
+        PermissionsModule,
+        RolesModule,
+        AppCacheModule,
+      ],
+      providers: [
+        optionsProvider,
+
+        // ── Proveedores “core” del CRUD mágico ──
+        FilteringService,
+        SortingService,
+        PaginationService,
+        HaclService,           // inyecta internamente PermissionsService, RolesService, CacheService
+        SoftDeleteService,
+        RelationsService,
+        ImportExportService,
+        BulkOpsService,
+        I18nService,
+        MetricsService,
+        HooksService,
+        RateLimitGuard,
+      ],
+      exports: [
+        // Exportar todos los servicios para que estén disponibles globalmente en toda la app
+        FilteringService,
+        SortingService,
+        PaginationService,
+        HaclService,
+        SoftDeleteService,
+        RelationsService,
+        ImportExportService,
+        BulkOpsService,
+        I18nService,
+        MetricsService,
+        HooksService,
+        RateLimitGuard,
+      ],
+    };
+  }
+
+  /**
+   * forFeature(entities)
+   *
+   * Por cada EntityFeature que recibimos:
+   *  1) Registramos el esquema con MongooseModule.forFeature(...)
+   *  2) Creamos un provider “CRUD_SERVICE_<ENTITY>” que instancia BaseCrudService
+   *  3) Generamos dinámicamente una clase @Controller("<route>") que extiende BaseCrudController
+   *     y usa @Inject("CRUD_SERVICE_<ENTITY>") para inyectar exactamente el servicio correcto.
+   */
+  static forFeature(entities: EntityFeature[]): DynamicModule {
+    console.log(
+      '⏩ [CrudMagic] forFeature se llamó con estas entidades:',
+      entities.map(e => e.name),
+    );
+
+    // 1) Registrar cada esquema en MongooseModule
+    const mongooseImports = entities.map(feat =>
+      MongooseModule.forFeature([{ name: feat.name, schema: feat.schema }]),
+    );
+
+    // 2) Crear proveedores de servicio (uno por entidad)
+    const serviceProviders: Provider[] = entities.map(feat => {
+      const token = `CRUD_SERVICE_${feat.name.toUpperCase()}`;
+      console.log(
+        ` • [CrudMagic] Creando proveedor para BaseCrudService de "${feat.name}" → token: ${token}`,
+      );
+
+      return {
+        provide: token,
+        // useFactory recibe todos los servicios que BaseCrudService necesita:
+        useFactory: (
+          filtering: FilteringService,
+          hacl: HaclService,
+          softDelete: SoftDeleteService,
+          relations: RelationsService,
+          importExport: ImportExportService,
+          bulkOps: BulkOpsService,
+          i18n: I18nService,
+          metrics: MetricsService,
+          hooks: HooksService,
+        ) => {
+          return new BaseCrudService(
+            feat.name,
+            feat,
+            filtering,
+            hacl,
+            softDelete,
+            relations,
+            importExport,
+            bulkOps,
+            i18n,
+            metrics,
+            hooks,
+          );
+        },
+        inject: [
+          FilteringService,
+          HaclService,
+          SoftDeleteService,
+          RelationsService,
+          ImportExportService,
+          BulkOpsService,
+          I18nService,
+          MetricsService,
+          HooksService,
+        ],
+      };
+    });
+
+    // 3) Generar dinámicamente la clase @Controller para cada entidad
+    const controllerClasses: any[] = entities.map(feat => {
+      const routePath = feat.name.toLowerCase();
+      console.log(
+        ` • [CrudMagic] Generando clase @Controller("${routePath}") que extiende BaseCrudController`,
+      );
+
+      @Controller(routePath)
+      class GeneratedCrudController extends BaseCrudController {
+        constructor(
+          // 1er parámetro: inyectamos explícitamente el token “CRUD_SERVICE_<ENTITY>”
+          @Inject(`CRUD_SERVICE_${feat.name.toUpperCase()}`)
+          crudService: BaseCrudService,
+
+          // El resto: se inyecta automáticamente por tipo
+          filteringService: FilteringService,
+          sortingService: SortingService,
+          paginationService: PaginationService,
+          rateLimitGuard: RateLimitGuard,
+        ) {
+          // El constructor de BaseCrudController debe esperar estos 5 parámetros en este orden:
+          super(feat.name, crudService, filteringService, sortingService, paginationService);
+          console.log(
+            `  → [CrudMagic] Se instanció GeneratedCrudController para "${feat.name}"`,
+          );
+        }
+      }
+
+      return GeneratedCrudController;
+    });
+
+    console.log(
+      `⏩ [CrudMagic] Devolver DynamicModule con Controllers:`,
+      controllerClasses.map(c => c?.name),
+      'y Providers:',
+      serviceProviders.map(p => (p as any).provide),
+    );
+
+    // 4) Devolvemos el DynamicModule completo:
+    return {
+      module: CrudMagicModule,
+      imports: [...mongooseImports],
+      providers: [...serviceProviders],
+      controllers: [...controllerClasses],
+      // Hacemos export de todos los tokens “CRUD_SERVICE_<ENTITY>” para que estén disponibles si alguien
+      // quisiera inyectarlos por separado. (Por ejemplo, si otro módulo quisiera usar ese servicio.)
+      exports: serviceProviders.map(p => (p as any).provide as string),
+    };
+  }
+}
+// crud-magic/src/decorators/crud.decorator.ts
+
+import { SetMetadata } from '@nestjs/common';
+
+/**
+ * @Crud()
+ *
+ * Decorador para marcar un controlador como generador de rutas CRUD automático.
+ * Opcionalmente podría definir nombre de ruta base o pipeline a usar.
+ */
+export const CRUD_KEY = 'CRUD_OPTIONS';
+
+export function Crud(options?: { path?: string; pipeline?: string }) {
+  return SetMetadata(CRUD_KEY, options || {});
+}
+// src/crud-magic/decorators/filter.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+export const Filterable = (...fields: string[]) => SetMetadata('filterable', fields);
+// src/crud-magic/decorators/hook.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+
+export const HOOK_KEY = 'CRUD_HOOKS';
+
+/**
+ * @CrudHook('beforeCreate')
+ */
+export const CrudHook = (hookName: string) => SetMetadata(HOOK_KEY, hookName);
+// src/crud-magic/decorators/index.ts
+export * from './crud.decorator';
+export * from './filter.decorator';
+export * from './hook.decorator';
+export * from './permissions.decorator';
+
+// src/crud-magic/decorators/permissions.decorator.ts
+import { SetMetadata } from '@nestjs/common';
+export const Permissions = (...perms: string[]) => SetMetadata('permissions', perms);
+// crud-magic/src/guards/hacl.guard.ts
+
+import { Injectable, ForbiddenException, SetMetadata, CanActivate, ExecutionContext } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { HaclService } from '../services/hacl.service';
+
+export const HACL_KEY = 'HACL_PERMISSION';
+
+/**
+ * @Hacl('users.read')  ⇒ guarda metadata HACL_KEY = 'users.read'
+ */
+export function Hacl(permissionKey: string): MethodDecorator {
+  return SetMetadata(HACL_KEY, permissionKey);
+}
+
+@Injectable()
+export class HaclGuard implements CanActivate {
+  constructor(
+    private readonly reflector: Reflector,
+    private readonly haclService: HaclService,
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const permiso: string | undefined =
+      this.reflector.get<string>(HACL_KEY, context.getHandler());
+    if (!permiso) {
+      return true;
+    }
+
+    const req = context.switchToHttp().getRequest();
+    const tenantId = (req.headers['x-tenant-id'] as string)?.trim() || 'default';
+    const user = req.user;
+
+    try {
+      await this.haclService.checkPermission(tenantId, user, permiso);
+      return true;
+    } catch (err) {
+      if (err instanceof ForbiddenException) {
+        throw err;
+      }
+      throw new ForbiddenException('No tienes permisos suficientes.');
+    }
+  }
+}
+// src/crud-magic/guards/index.ts
+export * from './hacl.guard';
+export * from './rate-limit.guard';
+
+// crud-magic/src/guards/rate-limit.guard.ts
+
+import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
+import { Context } from '@nestjs/graphql';
+
+/**
+ * RateLimitGuard
+ *
+ * Aplicable a las rutas CRUD automáticas para limitar cantidad de peticiones por IP/tenant.
+ * Sprint 6: implementar usando in‐memory o Redis para llevar conteo de peticiones.
+ */
+@Injectable()
+export class RateLimitGuard implements CanActivate {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    // 1) Obtener context (req.headers['x-tenant-id'], IP, etc.)
+    // 2) Contar peticiones en ventana (por Redis o Map en memoria)
+    // 3) Si excede, lanzar ForbiddenException('Rate limit exceeded')
+    throw new Error('RateLimitGuard.canActivate: not implemented');
+  }
+}
+// src/crud-magic/index.ts
+export * from './crud-magic.module';
+export * from './services';
+export * from './controllers';
+export * from './decorators';
+export * from './guards';
+export * from './interfaces';
+export * from './plugins';
+export * from './services';
+export * from './utils';
+    
+// crud-magic/src/interfaces/crud-magic-options.interface.ts
+
+/**
+ * Opciones globales para CrudMagicModule.forRoot()
+ *
+ * Aquí definimos parámetros como:
+ *  - defaultPageSize, maxPageSize
+ *  - cache (activar o desactivar, TTL)
+ *  - rateLimit (ventana, máximo)
+ *  - i18n (locales soportados, local por defecto)
+ *  - metrics (booleano para activar contadores)
+ *  - hooks: array global de hooks que se apliquen a todas las entidades
+ *
+ * En cada sprint iremos agregando nuevas propiedades a esta interfaz según lo acordado.
+ */
+export interface CrudMagicOptions {
+  defaultPageSize?: number;
+  maxPageSize?: number;
+
+  cache?: {
+    enabled: boolean;
+    ttlSeconds: number;
+  };
+
+  rateLimit?: {
+    enabled: boolean;
+    windowMs: number;
+    maxRequests: number;
+  };
+
+  i18n?: {
+    enabled: boolean;
+    locales: string[];
+    defaultLocale: string;
+  };
+
+  metrics?: {
+    enabled: boolean;
+  };
+
+  hooks?: {
+    // Hooks globales que se apliquen a todas las entidades
+    beforeCreate?: string[];
+    afterCreate?: string[];
+    // etc…
+  };
+}
+// src/crud-magic/interfaces/crud-options.interface.ts
+export interface GlobalCrudOptions {
+  defaultPageSize?: number;
+  maxPageSize?: number;
+  cache?: { ttlSeconds: number };
+  rateLimit?: { windowMs: number; max: number };
+  i18n?: { locales: string[]; defaultLocale: string };
+  metrics?: boolean;
+  // ...otros flags globales
+}
+// crud-magic/src/interfaces/entity-feature.interface.ts
+
+import { Schema } from 'mongoose';
+
+/**
+ * EntityFeature
+ *
+ * Configuración de cada entidad que expondremos con CRUD automático:
+ *  - name: nombre de la entidad/modelo (ej. 'Product')
+ *  - schema: Schema de Mongoose
+ *  - permisos: objeto { create: string, read: string, update: string, delete: string }
+ *      → claves de permisos en tu sistema HACL (p.ej. 'products.create', ...)
+ *  - filtros: definición de qué campos se pueden filtrar (texto, exactitud, rango)
+ *  - relaciones: array de relaciones a popular (campo, modelo a popular, permisos de acceso)
+ *  - softDelete: booleano (si habilita soft‐delete para esta entidad)
+ *  - audit: booleano (si habilita auditoría para create/update/delete)
+ *  - importExport: booleano (habilita importar/exportar CSV)
+ *  - bulkOps: booleano (habilita operaciones masivas)
+ *  - fieldLevelAuth: booleano (habilita protecciones a nivel de campo)
+ *  - protectedFields: mapa de { campo: permisoRequerido }
+ *  - hooks específicos de esta entidad: { beforeCreate: [], afterUpdate: [], ... }
+ *  - relationsPopulateDefault: array de nombres de campos que se deben popular por defecto.
+ */
+export interface EntityFeature {
+  name: string;
+  schema: Schema;
+  permisos: {
+    create: string;
+    read: string;
+    update: string;
+    delete: string;
+  };
+  filtros?: {
+    buscarTexto?: string[];      // campos donde buscar texto
+    camposExactos?: string[];    // campos de coincidencia exacta
+    camposRango?: string[];      // campos numéricos/fecha donde filtrar rangos
+  };
+  relaciones?: Array<{
+    campo: string;
+    model: string;
+    permisoLeer?: string;
+  }>;
+  softDelete?: boolean;
+  audit?: boolean;
+  importExport?: boolean;
+  bulkOps?: boolean;
+  fieldLevelAuth?: boolean;
+  protectedFields?: Record<string, string>; // { campo: permiso }
+  hooks?: {
+    beforeCreate?: string[];
+    afterCreate?: string[];
+    beforeUpdate?: string[];
+    afterUpdate?: string[];
+    beforeDelete?: string[];
+    afterDelete?: string[];
+  };
+  relationsPopulateDefault?: string[];
+}
+// src/crud-magic/interfaces/entity-options.interface.ts
+import { Schema } from 'mongoose';
+
+export interface EntityCrudOptions {
+  name: string;        // p.ej. 'Product' → ruta '/products'
+  schema: Schema;
+  primaryKey?: string; // por defecto '_id'
+
+  permisos?: {
+    create: string;
+    read: string;
+    update: string;
+    delete: string;
+  };
+
+  filtros?: {
+    buscarTexto?: string[];
+    camposExactos?: string[];
+    camposIn?: string[];
+    camposRango?: string[];
+  };
+
+  relaciones?: Array<{ campo: string; model: string }>;
+
+  softDelete?: boolean;
+  history?: boolean;
+  audit?: boolean;
+  exportCsv?: boolean;
+  importCsv?: boolean;
+  fieldLevelAuth?: boolean;
+  protectedFields?: Record<string, string>; // { campo: permisoRequerido }
+  hooks?: Array<new () => any>;
+  mixins?: Array<new () => any>;
+  populateDefaults?: string[];
+  // ...otros flags específicos
+}
+// crud-magic/src/interfaces/hacl.interface.ts
+
+/**
+ * HACL internal interface
+ *
+ * Determina los métodos mínimos que nuestro HaclService debe exponer
+ * para que BaseCrudController pueda invocarlo en cada operación.
+ */
+export interface HaclInterface {
+  /**
+   * Verifica que el usuario (payload JWT) tenga el permiso “permiso”
+   * para operar en tenant “tenantId”.  
+   * - Devuelve void si OK, o lanza ForbiddenException si no.
+   */
+  checkPermission(tenantId: string, user: any, permiso: string): Promise<void>;
+}
+// src/crud-magic/interfaces/hook.interface.ts
+
+export interface ICrudHookService {
+  beforeCreate?(entity: any, context: any): Promise<void>;
+  afterCreate?(entity: any, context: any): Promise<void>;
+  beforeUpdate?(existing: any, updates: any, context: any): Promise<void>;
+  afterUpdate?(updated: any, context: any): Promise<void>;
+  beforeDelete?(existing: any, context: any): Promise<void>;
+  afterDelete?(deleted: any, context: any): Promise<void>;
+}
+// crud-magic/src/interfaces/import-export.interface.ts
+
+/**
+ * ImportExportInterface
+ *
+ * - exportCsv: recibe filtros y genera un CSV (podría devolver un stream o Buffer).
+ * - importCsv: recibe un archivo CSV y lo parsea para crear/marcar registros.
+ */
+export interface ImportExportInterface {
+  exportCsv(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    filter: any,
+  ): Promise<Buffer>;
+
+  importCsv(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    csvBuffer: Buffer,
+  ): Promise<void>;
+}
+// src/crud-magic/controllers/index.ts
+export * from './crud-magic-options.interface';
+export * from './crud-options.interface';
+export * from './entity-feature.interface';
+export * from './entity-options.interface';
+export * from './hacl.interface';
+export * from './hook.interface';
+export * from './import-export.interface';
+export * from './metrics.interface';
+export * from './pagination.interface';
+export * from './relations.interface';
+export * from './response-format.interface';
+export * from './soft-delete.interface';
+
+// crud-magic/src/interfaces/metrics.interface.ts
+
+/**
+ * MetricsInterface
+ *
+ * - incrementCounter: sumar 1 a un contador específico (ej. 'products.findAll')
+ * - recordLatency: registrar latencia de un endpoint en milisegundos
+ * - getMetrics: devolver un objeto con métricas acumuladas
+ */
+export interface MetricsInterface {
+  incrementCounter(metricName: string): void;
+  recordLatency(metricName: string, ms: number): void;
+  getMetrics(): Record<string, any>;
+}
+// crud-magic/src/interfaces/pagination.interface.ts
+
+/**
+ * PaginationOptions
+ *
+ * Opciones que pasaremos a BaseCrudService.findAll:
+ *   - filter: criterios Mongoose
+ *   - sort: objeto { campo: 1 | -1 }
+ *   - skip: cantidad a omitir
+ *   - limit: cantidad máxima a devolver
+ */
+export interface PaginationOptions {
+  filter: Record<string, any>;
+  sort: Record<string, 1 | -1>;
+  skip: number;
+  limit: number;
+  page: number;
+}
+// crud-magic/src/interfaces/relations.interface.ts
+
+/**
+ * RelationsInterface
+ *
+ * Métodos mínimos para validar y popular relaciones:
+ *  - validateRelations: asegura que los IDs de relación en el body existan y el usuario tenga permiso de leer la entidad relacionada.
+ *  - applyPopulate: construye el objeto “.populate(...)” para Mongoose según la configuración.
+ */
+export interface RelationsInterface {
+  validateRelations(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    relationsInBody: Record<string, any>,
+  ): Promise<void>;
+
+  applyPopulate(
+    tenantId: string,
+    entityName: string,
+    query: any,       // query de Mongoose (ej. Model.find(filter))
+    populateFields?: string[],
+  ): any; // devuelve el query con populate aplicado
+}
+// crud-magic/src/interfaces/response-format.interface.ts
+
+/**
+ * ResponseFormat
+ *
+ * Para estandarizar las respuestas de findAll y findOne.
+ */
+export interface ResponseFormat<T> {
+  data: T[];
+  total: number;
+  page: number;
+  limit: number;
+  elapsedMs: number;
+}
+// crud-magic/src/interfaces/soft-delete.interface.ts
+
+/**
+ * SoftDeleteInterface
+ *
+ * Métodos mínimos que nuestro SoftDeleteService debe exponer:
+ *  - applySoftDeleteFlag: antes de eliminar físicamente, marcar el documento con “deleted: true” o un campo equivalente.
+ *  - filterDeleted: al buscar (findAll/findOne), agregar condición para excluir “deleted: true”.
+ */
+export interface SoftDeleteInterface {
+  applySoftDeleteFlag(
+    tenantId: string,
+    entityName: string,
+    id: string,
+  ): Promise<void>;
+
+  filterDeleted(
+    tenantId: string,
+    entityName: string,
+    baseFilter: any,
+  ): any;
+}
+// src/crud-magic/plugins/audit/audit.module.ts
+import { Module } from '@nestjs/common';
+import { AuditWrapperService } from '../../services/audit-wrapper.service';
+
+@Module({
+  providers: [AuditWrapperService],
+  exports: [AuditWrapperService],
+})
+export class AuditPluginModule {}
+// src/crud-magic/plugins/bulk-ops/bulk-ops.module.ts
+import { Module } from '@nestjs/common';
+import { BulkOpsService } from '../../services/bulk-ops.service';
+
+@Module({
+  providers: [BulkOpsService],
+  exports: [BulkOpsService],
+})
+export class BulkOpsModule {}
+// src/crud-magic/plugins/cache/cache.module.ts
+import { Module } from '@nestjs/common';
+import { CachePluginService } from '../../services';
+
+@Module({
+  providers: [CachePluginService],
+  exports: [CachePluginService],
+})
+export class CachePluginModule {}
+// src/crud-magic/plugins/filtering/filtering.module.ts
+import { Module } from '@nestjs/common';
+import { FilteringService } from '../../services/filtering.service';
+
+@Module({
+  providers: [FilteringService],
+  exports: [FilteringService],
+})
+export class FilteringModule {}
+// crud-magic/src/plugins/hacl.plugin.module.ts
+
+import { Module } from '@nestjs/common';
+import { HaclService } from '../../services/hacl.service';
+
+/**
+ * HaclPluginModule
+ *
+ * Si en algún momento queremos aislar lógica de HACL en su propio módulo,
+ * la envolveríamos aquí y exportaríamos HaclService.
+ */
+@Module({
+  providers: [HaclService],
+  exports: [HaclService],
+})
+export class HaclPluginModule {}
+// src/crud-magic/plugins/hooks/hooks.module.ts
+import { Module, DynamicModule } from '@nestjs/common';
+
+@Module({})
+export class HooksModule {
+  static register(hooks: any[]): DynamicModule {
+    return {
+      module: HooksModule,
+      providers: [...hooks],
+      exports: [...hooks],
+    };
+  }
+}
+// src/crud-magic/plugins/i18n/i18n.module.ts
+import { Module } from '@nestjs/common';
+import { I18nService } from '../../services/i18n.service';
+
+@Module({
+  providers: [I18nService],
+  exports: [I18nService],
+})
+export class I18nModule {}
+// src/crud-magic/plugins/import-export/import-export.module.ts
+import { Module } from '@nestjs/common';
+import { ImportExportService } from '../../services/import-export.service';
+
+@Module({
+  providers: [ImportExportService],
+  exports: [ImportExportService],
+})
+export class ImportExportModule {}
+// src/crud-magic/plugins/index.ts
+export * from './audit/audit.module';
+export * from './bulk-ops/bulk-ops.module';
+export * from './cache/cache.module';
+export * from './filtering/filtering.module';
+export * from './hacl/hacl.module';
+export * from './hooks/hooks.module';
+export * from './i18n/i18n.module';
+export * from './import-export/import-export.module';
+export * from './metrics/metrics.module';
+export * from './relations/relations.module';
+export * from './security/security.module';
+export * from './soft-delete/soft-delete.module';
+// src/crud-magic/plugins/metrics/metrics.module.ts
+import { Module } from '@nestjs/common';
+import { MetricsService } from '../../services/metrics.service';
+
+@Module({
+  providers: [MetricsService],
+  exports: [MetricsService],
+})
+export class MetricsModule {}
+// src/crud-magic/plugins/relations/relations.module.ts
+import { Module } from '@nestjs/common';
+import { RelationsService } from '../../services/relations.service';
+
+@Module({
+  providers: [RelationsService],
+  exports: [RelationsService],
+})
+export class RelationsModule {}
+// src/crud-magic/plugins/security/security.module.ts
+import { Module } from '@nestjs/common';
+import { RateLimitGuard } from '../../guards/rate-limit.guard';
+
+@Module({
+  providers: [RateLimitGuard],
+  exports: [RateLimitGuard],
+})
+export class SecurityModule {}
+// src/crud-magic/plugins/soft-delete/soft-delete.module.ts
+import { Module } from '@nestjs/common';
+import { SoftDeleteService } from '../../services/soft-delete.service';
+
+@Module({
+  providers: [SoftDeleteService],
+  exports: [SoftDeleteService],
+})
+export class SoftDeleteModule {}
+// src/crud-magic/services/audit-wrapper.service.ts
+import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class AuditWrapperService {
+  async log(tenantId: string, userId: string, action: string, resourceType: string, resourceId: string, metadata: any): Promise<void> {
+    throw new Error('AuditWrapperService.log: not implemented');
+  }
+}
+// crud-magic/src/services/base-crud.service.ts
+
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Model, Types } from 'mongoose';
+import { EntityFeature } from '../interfaces/entity-feature.interface';
+import { FilteringService } from './filtering.service';
+import { SoftDeleteService } from './soft-delete.service';
+import { RelationsService } from './relations.service';
+import { ImportExportService } from './import-export.service';
+
+import { HooksService } from './hooks.service';
+import { BulkOpsService } from './bulk-ops.service';
+import { I18nService } from './i18n.service';
+import { MetricsService } from './metrics.service';
+import { HaclService } from './hacl.service';
+
+/**
+* BaseCrudService
+*
+* Servicio genérico que implementa:
+*  - create
+*  - findAll
+*  - findOne
+*  - update
+*  - delete
+*  - bulkCreate, bulkUpdate
+*  - exportCsv, importCsv
+*
+* Por ahora cada método lanza 'Not implemented'. En futuros sprints completaremos la lógica
+* usando los demás servicios (filtering, hacl, softDelete, relations, importExport, bulkOps, i18n, metrics, hooks, cache).
+*/
+@Injectable()
+export class BaseCrudService {
+  private model: any = null;  // o un valor por defecto
+  
+  constructor(
+    private readonly entityName: string,
+    private readonly feature: EntityFeature,
+    private readonly filteringService: FilteringService,
+    private readonly haclService: HaclService,
+    private readonly softDeleteService: SoftDeleteService,
+    private readonly relationsService: RelationsService,
+    private readonly importExportService: ImportExportService,
+    private readonly bulkOpsService: BulkOpsService,
+    private readonly i18nService: I18nService,
+    private readonly metricsService: MetricsService,
+    private readonly hooksService: HooksService,
+  ) {
+    // En el forFeature inyectamos Model a través de MongooseModule.forFeature
+    // Aquí asumimos que el provider “CRUD_SERVICE_<NAME>” recibió el Model ya configurado,
+    // pero para simplificar este constructor, omitimos la inyección directa del model.
+    
+  }
+  
+  
+  async findAll(
+    tenantId: string,
+    user: any,
+    filter: Record<string, any>,
+    sort: Record<string, 1 | -1>,
+    skip: number,
+    limit: number,
+  ): Promise<[any[], number]> {
+    // Suponiendo que cada doc almacena tenantId en el campo `tenantId`
+    /**
+    * Flujo:
+    * 1) HACL: checkPermission(tenantId, user, feature.permisos.read)
+    * 2) Construir filter: filteringService.buildFilter(queryOpts)
+    * 3) Soft‐delete: filter = softDeleteService.filterDeleted(...)
+    * 4) Relaciones: aplicar populate en query
+    * 5) Cache: intentar leer de cachePluginService.get( key )
+    *     si existe, devolver respuesta cacheada
+    * 6) Ejecución en Mongo: Model.find(filter).skip(...).limit(...).sort(...)
+    * 7) Metrics: recordLatency, incrementCounter
+    * 8) Cache: cachePluginService.set(key, resultado, TTL)
+    * 9) ResponseFormat: devolver { data, total, page, limit, elapsedMs }
+    */
+    const combinedFilter = { tenantId, ...filter };
+    const [data, total] = await Promise.all([
+      this.model.find(combinedFilter).sort(sort).skip(skip).limit(limit).exec(),
+      this.model.countDocuments(combinedFilter).exec(),
+    ]);
+    return [data, total];
+  }
+  
+  
+  
+  async findOne(
+    tenantId: string,
+    user: any,
+    id: string,
+  ): Promise<any> {
+    /**
+    * Flujo:
+    * 1) HACL: checkPermission(read)
+    * 2) Soft‐delete: softDeleteService.filterDeleted para excluir borrados
+    * 3) Cache: intentar leer de cachePluginService.get( key )
+    * 4) Model.findOne({ _id, tenantId, deleted:false })
+    * 5) Relaciones: populate si corresponde
+    * 6) Metrics / Cache / Audit
+    */
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID inválido');
+    }
+    const doc = await this.model.findOne({ _id: id, tenantId }).exec();
+    if (!doc) {
+      throw new NotFoundException(`Recurso con id=${id} no encontrado`);
+    }
+    return doc;
+  }
+  
+  async create(
+    tenantId: string,
+    user: any,
+    dto: any,
+  ): Promise<any> {
+    // Agregar el tenantId en el doc
+    /**
+    * Flujo:
+    * 1) HACL: haclService.checkPermission(tenantId, user, feature.permisos.create)
+    * 2) Hooks beforeCreate
+    * 3) Validar relaciones: relationsService.validateRelations(...)
+    * 4) Ejecutar create en Mongoose con softDelete=false
+    * 5) Hooks afterCreate
+    * 6) Metrics: metricsService.incrementCounter('entity.create')
+    * 7) Cache: invalidar caché de findAll/findOne
+    * 8) Audit: auditWrapper.log(...)
+    */
+    const newDoc = new this.model({ ...dto, tenantId });
+    return await newDoc.save();
+  }
+  
+  async update(
+    tenantId: string,
+    user: any,
+    id: string,
+    dto: any,
+  ): Promise<any> {
+    /**
+    * Flujo:
+    * 1) HACL: checkPermission(update)
+    * 2) Hooks beforeUpdate
+    * 3) Soft‐delete: verificar que no esté borrado
+    * 4) Validar relaciones: relationsService.validateRelations(...)
+    * 5) Model.findOneAndUpdate(...)
+    * 6) Hooks afterUpdate
+    * 7) Metrics / Cache / Audit
+    */
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID inválido');
+    }
+    const updated = await this.model
+    .findOneAndUpdate({ _id: id, tenantId }, dto, { new: true })
+    .exec();
+    if (!updated) {
+      throw new NotFoundException(`No se encontró id=${id} para actualizar`);
+    }
+    return updated;
+  }
+  
+  async delete(
+    tenantId: string,
+    user: any,
+    id: string,
+  ): Promise<void> {
+    /**
+    * Flujo:
+    * 1) HACL: checkPermission(delete)
+    * 2) Hooks beforeDelete
+    * 3) Soft‐delete: si feature.softDelete=true, softDeleteService.applySoftDeleteFlag(...)
+    *            sino: Model.deleteOne({ _id, tenantId })
+    * 4) Hooks afterDelete
+    * 5) Metrics / Cache / Audit
+    */
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('ID inválido');
+    }
+    const result = await this.model.deleteOne({ _id: id, tenantId }).exec();
+    if (result.deletedCount === 0) {
+      throw new NotFoundException(`No se encontró id=${id} para eliminar`);
+    }
+  }
+  
+  
+  
+  // Bulk‐operations
+  async bulkCreate(
+    tenantId: string,
+    user: any,
+    dtos: any[],
+  ): Promise<any[]> {
+    // TODO: ver permiso bulk→ tal vez permisos.create
+    throw new Error('BaseCrudService.bulkCreate: not implemented');
+  }
+  
+  async bulkUpdate(
+    tenantId: string,
+    user: any,
+    items: { id: string; dto: any }[],
+  ): Promise<any[]> {
+    // TODO: ver permiso bulk→ tal vez permisos.update
+    throw new Error('BaseCrudService.bulkUpdate: not implemented');
+  }
+  
+  // Import/Export CSV
+  async exportCsv(
+    tenantId: string,
+    user: any,
+    filter: any,
+  ): Promise<Buffer> {
+    throw new Error('BaseCrudService.exportCsv: not implemented');
+  }
+  
+  async importCsv(
+    tenantId: string,
+    user: any,
+    csvBuffer: Buffer,
+  ): Promise<void> {
+    throw new Error('BaseCrudService.importCsv: not implemented');
+  }
+}
+// crud-magic/src/services/bulk-ops.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * BulkOpsService
+ *
+ * - bulkCreate(): crea múltiples documentos en una sola operación
+ * - bulkUpdate(): actualiza múltiples documentos en una sola operación
+ *
+ * Sprint 5: implementar usando Model.insertMany() y Model.bulkWrite()
+ */
+@Injectable()
+export class BulkOpsService {
+  async bulkCreate(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    dtos: any[],
+  ): Promise<any[]> {
+    throw new Error('BulkOpsService.bulkCreate: not implemented');
+  }
+
+  async bulkUpdate(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    items: { id: string; dto: any }[],
+  ): Promise<any[]> {
+    throw new Error('BulkOpsService.bulkUpdate: not implemented');
+  }
+}
+// crud-magic/src/services/cache-plugin.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * CachePluginService
+ *
+ * - get(cacheKey: string): Promise<any>
+ * - set(cacheKey: string, value: any, ttl: number): Promise<void>
+ * - del(cacheKeyPattern: string): Promise<void>
+ *
+ * Sprint 4: implementar usando el CacheService global (Redis) para almacenar resultados de findAll/findOne.
+ */
+@Injectable()
+export class CachePluginService {
+  async get(cacheKey: string): Promise<any> {
+    throw new Error('CachePluginService.get: not implemented');
+  }
+
+  async set(cacheKey: string, value: any, ttlSeconds: number): Promise<void> {
+    throw new Error('CachePluginService.set: not implemented');
+  }
+
+  async del(cacheKeyPattern: string): Promise<void> {
+    throw new Error('CachePluginService.del: not implemented');
+  }
+}
+// crud-magic/src/services/filtering.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * FilteringService
+ *
+ * Convierte los query-params `?filter[name]=foo&filter[age][gt]=30` en un objeto
+ * { name: 'foo', age: { $gt: 30 } }
+ *
+ * Este ejemplo es muy simple: asume que el cliente envía algo así como:
+ *  ?filter[field]=value            → { field: 'value' }
+ *  ?filter[field][gt]=100          → { field: { $gt: 100 } }
+ *  ?filter[field][lt]=200          → { field: { $lt: 200 } }
+ *  ?filter[field][in]=val1,val2    → { field: { $in: ['val1','val2'] } }
+ *
+ * Si no hay `filter` en req.query, retorna {}.
+ */
+@Injectable()
+export class FilteringService {
+  buildFilter(query: any): Record<string, any> {
+    const out: Record<string, any> = {};
+    const rawFilter = query.filter;
+    if (!rawFilter || typeof rawFilter !== 'object') {
+      return out;
+    }
+
+    for (const [field, cond] of Object.entries(rawFilter as Record<string, any>)) {
+      if (typeof cond === 'string' || typeof cond === 'number' || Array.isArray(cond)) {
+        // ?filter[field]=value
+        out[field] = cond;
+      } else if (typeof cond === 'object') {
+        // ?filter[field][gt]=value, ?filter[field][in]=val1,val2
+        const operatorObj: Record<string, any> = {};
+        for (const [opKey, opVal] of Object.entries(cond)) {
+          switch (opKey) {
+            case 'gt':
+              operatorObj['$gt'] = this._parseValue(opVal);
+              break;
+            case 'lt':
+              operatorObj['$lt'] = this._parseValue(opVal);
+              break;
+            case 'gte':
+              operatorObj['$gte'] = this._parseValue(opVal);
+              break;
+            case 'lte':
+              operatorObj['$lte'] = this._parseValue(opVal);
+              break;
+            case 'in':
+              operatorObj['$in'] = ('' + opVal).split(',').map((v) => this._parseValue(v));
+              break;
+            case 'neq':
+              operatorObj['$ne'] = this._parseValue(opVal);
+              break;
+            // agregar más operadores según necesidad…
+            default:
+              break;
+          }
+        }
+        out[field] = operatorObj;
+      }
+    }
+    return out;
+  }
+
+  private _parseValue(val: any): any {
+    // Si es número, convertir a Number
+    const num = Number(val);
+    if (!isNaN(num) && typeof val === 'string') {
+      return num;
+    }
+    // si viene “true” / “false”
+    if (val === 'true') return true;
+    if (val === 'false') return false;
+    return val;
+  }
+}
+// crud-magic/src/services/hacl.service.ts
+
+import { Injectable, ForbiddenException } from '@nestjs/common';
+import { PermissionsService } from '../../modules/permissions/permissions.service';
+import { RolesService } from '../../modules/roles/roles.service';
+import { CacheService } from '../../common/cache/cache.service';
+
+/**
+ * HaclService
+ *
+ * Lógica mínima para:
+ *  - Obtener los roles que tiene el usuario
+ *  - Traducir roles → permisos usando RolesService.getPermissionsForRoles()
+ *  - Verificar que el permiso "<entidad>.<acción>" esté en esa lista
+ */
+@Injectable()
+export class HaclService {
+  constructor(
+    private readonly permissionsService: PermissionsService,
+    private readonly rolesService: RolesService,
+    private readonly cacheService: CacheService, // opcional para cachear permisos por usuario
+  ) {}
+
+  /**
+   * Verifica que el usuario (payload JWT) tenga el permiso "permiso"
+   * para operar en el tenantId dado.
+   *
+   * permiso debe venir en formato "<entidad>.<acción>" (p. ej. "users.read").
+   * user.roles es un array de roleIds (string).
+   * Llamamos a RolesService.getPermissionsForRoles que retorna ["users.read", ...].
+   */
+  async checkPermission(
+    tenantId: string,
+    user: any,
+    permiso: string,
+  ): Promise<void> {
+    if (!user || !Array.isArray(user.roles)) {
+      throw new ForbiddenException('Usuario no autenticado o sin roles.');
+    }
+
+    const roleIds: string[] = user.roles.map((r: any) => r.toString());
+
+    // Chequeo de cache: clave = `${tenantId}:${userId}:${sortedRoleIds}`
+    const cacheKey = `hacl:${tenantId}:${user.userId}:${roleIds.sort().join(',')}`;
+
+    let permisosUsuario: string[] | null = await this.cacheService.getJSON<string[]>(cacheKey);
+    if (permisosUsuario === null) {
+      // No está en cache → lo obtenemos desde RolesService
+      permisosUsuario = await this.rolesService.getPermissionsForRoles(tenantId, roleIds);
+      // Guardamos en Redis por 60 segundos
+      await this.cacheService.setJSON(cacheKey, permisosUsuario, 60);
+    }
+
+    // Verificamos que el permiso solicitado esté en la lista
+    if (!permisosUsuario.includes(permiso)) {
+      throw new ForbiddenException(`No tienes permiso: ${permiso}`);
+    }
+    // Si llegamos acá, el usuario tiene el permiso requerido → devolvemos void
+  }
+}
+// crud-magic/src/services/hooks.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * HooksService
+ *
+ * Registro y ejecución de “hooks” (servicios que implementen cierta interfaz).
+ * Permite a terceros registrar funciones a ejecutar antes/después de cada operación CRUD.
+ *
+ * Sprint 7: exponer registerHook(entityName, hookInstance) y ejecutar en BaseCrudService.
+ */
+@Injectable()
+export class HooksService {
+  /**
+   * Registra un hook para una entidad y evento específico
+   */
+  registerHook(
+    entityName: string,
+    event: 'beforeCreate' | 'afterCreate' | 'beforeUpdate' | 'afterUpdate' | 'beforeDelete' | 'afterDelete',
+    hookName: string,
+  ) {
+    throw new Error('HooksService.registerHook: not implemented');
+  }
+
+  /**
+   * Ejecuta todos los hooks registrados para un evento determinado,
+   * pasándole los parámetros necesarios (tenantId, user, payload).
+   */
+  async executeHooks(
+    entityName: string,
+    event: string,
+    context: any,
+  ): Promise<void> {
+    throw new Error('HooksService.executeHooks: not implemented');
+  }
+}
+// crud-magic/src/services/i18n.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * I18nService
+ *
+ * - translate(key: string, locale?: string, variables?: any): string
+ *   Función que lee archivos JSON de idioma (p.ej. en /i18n/es.json) y devuelve texto traducido.
+ *
+ * Sprint 6: implementar lectura de archivos y reemplazo de variables dinámicas.
+ */
+@Injectable()
+export class I18nService {
+  translate(
+    key: string,
+    locale?: string,
+    variables?: Record<string, any>,
+  ): string {
+    throw new Error('I18nService.translate: not implemented');
+  }
+}
+// crud-magic/src/services/import-export.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * ImportExportService
+ *
+ * - exportCsv(): recibe filtros, genera Buffer de CSV con todas las filas correspondient
+ * - importCsv(): parsea un Buffer CSV y crea actualiza documentos en la colección
+ *
+ * Sprint 5: implementar con alguna librería tipo papaparse o csv-parse.
+ */
+@Injectable()
+export class ImportExportService {
+  async exportCsv(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    filter: any,
+  ): Promise<Buffer> {
+    throw new Error('ImportExportService.exportCsv: not implemented');
+  }
+
+  async importCsv(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    csvBuffer: Buffer,
+  ): Promise<void> {
+    throw new Error('ImportExportService.importCsv: not implemented');
+  }
+}
+// src/crud-magic/services/index.ts
+export * from './audit-wrapper.service';
+export * from './base-crud.service';
+export * from './bulk-ops.service';
+export * from './cache.service';
+export * from './filtering.service';
+export * from './hacl.service';
+export * from './hooks.service';
+export * from './i18n.service';
+export * from './import-export.service';
+export * from './metrics.service';
+export * from './relations.service';
+export * from './soft-delete.service';
+export * from './sorting.service';
+export * from './pagination.service';
+// crud-magic/src/services/metrics.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * MetricsService
+ *
+ * - incrementCounter(metricName: string): void
+ * - recordLatency(metricName: string, ms: number): void
+ * - getMetrics(): Record<string, any>
+ *
+ * Sprint 6: implementar con un objeto en memoria o exponer un endpoint `/metrics`.
+ */
+@Injectable()
+export class MetricsService {
+  incrementCounter(metricName: string): void {
+    throw new Error('MetricsService.incrementCounter: not implemented');
+  }
+
+  recordLatency(metricName: string, ms: number): void {
+    throw new Error('MetricsService.recordLatency: not implemented');
+  }
+
+  getMetrics(): Record<string, any> {
+    throw new Error('MetricsService.getMetrics: not implemented');
+  }
+}
+// crud-magic/src/services/pagination.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { PaginationOptions } from '../interfaces/pagination.interface';
+
+/**
+ * PaginationService
+ *
+ * Lee `?page=` y `?limit=` del querystring.  
+ * - Por defecto, page=1, limit=10.  
+ * - Si se envía algo inválido, usamos los valores por defecto.
+ *
+ * Retorna un objeto con:
+ *  { page, limit, skip, take }
+ *
+ * skip = (page - 1) * limit
+ */
+@Injectable()
+export class PaginationService {
+  parse(query: any): { page: number; limit: number; skip: number } {
+    let page = 1;
+    let limit = 10;
+
+    if (query.page) {
+      const p = Number(query.page);
+      if (!isNaN(p) && p > 0) page = p;
+    }
+    if (query.limit) {
+      const l = Number(query.limit);
+      if (!isNaN(l) && l > 0) limit = l;
+    }
+
+    const skip = (page - 1) * limit;
+    return { page, limit, skip };
+  }
+}
+// crud-magic/src/services/relations.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { Model, Types } from 'mongoose';
+
+/**
+ * RelationsService
+ *
+ * Métodos:
+ *  - validateRelations(): para cada campo relacional en el DTO, verifica que exista
+ *      el documento en la colección asociada y que el usuario tenga permiso de leerlo.
+ *  - applyPopulate(): construye la llamada .populate(...) en el query de Mongoose.
+ *
+ * Sprint 4: implementar validateRelations() y applyPopulate() usando Mongoose.
+ */
+@Injectable()
+export class RelationsService {
+  async validateRelations(
+    tenantId: string,
+    user: any,
+    entityName: string,
+    relationsInBody: Record<string, any>,
+  ): Promise<void> {
+    throw new Error('RelationsService.validateRelations: not implemented');
+  }
+
+  applyPopulate(
+    tenantId: string,
+    entityName: string,
+    query: any,
+    populateFields?: string[],
+  ): any {
+    throw new Error('RelationsService.applyPopulate: not implemented');
+  }
+}
+// crud-magic/src/services/soft-delete.service.ts
+
+import { Injectable } from '@nestjs/common';
+import { Model, Types } from 'mongoose';
+
+/**
+ * SoftDeleteService
+ *
+ * Ofrece métodos para:
+ *  - applySoftDeleteFlag(): en vez de eliminar físicamente, marca “deleted: true” y “deletedAt: Date.now()”
+ *  - filterDeleted(): agrega “deleted: false” a los filtros de búsqueda
+ *
+ * Sprint 3: implementar estos dos métodos de forma genérica para cualquier entidad.
+ */
+@Injectable()
+export class SoftDeleteService {
+  async applySoftDeleteFlag(
+    tenantId: string,
+    entityName: string,
+    id: string,
+  ): Promise<void> {
+    throw new Error('SoftDeleteService.applySoftDeleteFlag: not implemented');
+  }
+
+  filterDeleted(
+    tenantId: string,
+    entityName: string,
+    baseFilter: any,
+  ): any {
+    throw new Error('SoftDeleteService.filterDeleted: not implemented');
+  }
+}
+// crud-magic/src/services/sorting.service.ts
+
+import { Injectable } from '@nestjs/common';
+
+/**
+ * SortingService
+ *
+ * Convierte `?sort=+name,-createdAt` en un objeto Mongoose: { name: 1, createdAt: -1 }
+ * - Si el parámetro `sort` es omitido → retorna {}.
+ * - Si se envía como `?sort=name` se considera ascendente.
+ * - “+campo” ascendente, “-campo” descendente.
+ */
+@Injectable()
+export class SortingService {
+  buildSort(query: any): Record<string, 1 | -1> {
+    const raw = query.sort;
+    const out: Record<string, 1 | -1> = {};
+    if (!raw) return out;
+
+    // Puede venir como array o como string: 
+    //   ?sort=+name,-createdAt
+    const fields = Array.isArray(raw) ? raw : ('' + raw).split(',');
+
+    for (const token of fields) {
+      if (!token) continue;
+      const trimmed = token.trim();
+      if (trimmed.startsWith('-')) {
+        const field = trimmed.slice(1);
+        out[field] = -1;
+      } else if (trimmed.startsWith('+')) {
+        const field = trimmed.slice(1);
+        out[field] = 1;
+      } else {
+        out[trimmed] = 1;
+      }
+    }
+    return out;
+  }
+}
+// src/crud-magic/utils/dto-factory.ts
+export function createDtoFromSchema(schema: any): any {
+  throw new Error('dto-factory.createDtoFromSchema: not implemented');
+}
+// src/crud-magic/utils/index.ts
+export * from './dto-factory';
+export * from './mongoose-key-transform';
+
+// src/crud-magic/utils/mongoose-key-transform.ts
+export function transformQueryKeys(obj: any): any {
+  throw new Error('mongoose-key-transform.transformQueryKeys: not implemented');
+}

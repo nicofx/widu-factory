@@ -1,60 +1,82 @@
 // crud-magic/src/services/hacl.service.ts
 
 import { Injectable, ForbiddenException } from '@nestjs/common';
-import { PermissionsService } from '../../modules/permissions/permissions.service';
 import { RolesService } from '../../modules/roles/roles.service';
 import { CacheService } from '../../common/cache/cache.service';
 
 /**
  * HaclService
  *
- * Lógica mínima para:
- *  - Obtener los roles que tiene el usuario
- *  - Traducir roles → permisos usando RolesService.getPermissionsForRoles()
- *  - Verificar que el permiso "<entidad>.<acción>" esté en esa lista
+ * - Usa directamente user.roles (array de roleIds como string) del JWT.
+ * - Llama a RolesService.getPermissionsForRoles(tenantId, roleIds) para obtener los permisos.
+ * - Cachea el array de permisos 60 segundos con CacheService.getJSON/setJSON.
+ * - Si falta el permiso, lanza ForbiddenException.
  */
 @Injectable()
 export class HaclService {
   constructor(
-    private readonly permissionsService: PermissionsService,
     private readonly rolesService: RolesService,
-    private readonly cacheService: CacheService, // opcional para cachear permisos por usuario
+    private readonly cacheService: CacheService,
   ) {}
 
   /**
-   * Verifica que el usuario (payload JWT) tenga el permiso "permiso"
-   * para operar en el tenantId dado.
+   * Verifica que el usuario tenga el permisoRequerido en el tenantId dado.
    *
-   * permiso debe venir en formato "<entidad>.<acción>" (p. ej. "users.read").
-   * user.roles es un array de roleIds (string).
-   * Llamamos a RolesService.getPermissionsForRoles que retorna ["users.read", ...].
+   * Pasos:
+   * 1) Asegura que user.roles exista y sea un array.
+   * 2) Construye cacheKey = `hacl:${tenantId}:${userId}:${sortedRoles}`.
+   * 3) Intenta leer permisosUsuario = cacheService.getJSON(cacheKey).
+   * 4) Si no hay cache → permisosUsuario = rolesService.getPermissionsForRoles(tenantId, roleIds).
+   *    Luego cacheService.setJSON(cacheKey, permisosUsuario, 60).
+   * 5) Si permisoRequerido no está en permisosUsuario → ForbiddenException.
    */
   async checkPermission(
     tenantId: string,
     user: any,
-    permiso: string,
+    permisoRequerido: string,
   ): Promise<void> {
+    // 1) Verificar que user.roles sea un array de strings
     if (!user || !Array.isArray(user.roles)) {
       throw new ForbiddenException('Usuario no autenticado o sin roles.');
     }
 
-    const roleIds: string[] = user.roles.map((r: any) => r.toString());
+    // Determinar userId (adapta si en tu JWT usas otro campo)
+    const userId = (user.userId as string) || (user.id as string);
+    if (!userId) {
+      throw new ForbiddenException('No se encontró userId en el payload.');
+    }
 
-    // Chequeo de cache: clave = `${tenantId}:${userId}:${sortedRoleIds}`
-    const cacheKey = `hacl:${tenantId}:${user.userId}:${roleIds.sort().join(',')}`;
+    // 2) Construir cacheKey usando tenantId, userId y roles ordenados
+    const rolesIds: string[] = (user.roles as string[]).map((r) => r.toString());
+    const sortedRoles = [...rolesIds].sort().join(',');
+    const cacheKey = `hacl:${tenantId}:${userId}:${sortedRoles}`;
 
-    let permisosUsuario: string[] | null = await this.cacheService.getJSON<string[]>(cacheKey);
-    if (permisosUsuario === null) {
-      // No está en cache → lo obtenemos desde RolesService
-      permisosUsuario = await this.rolesService.getPermissionsForRoles(tenantId, roleIds);
-      // Guardamos en Redis por 60 segundos
+    // 3) Intentar leer permisosUsuario de cache
+    let permisosUsuario: string[] | null = null;
+    try {
+      permisosUsuario = await this.cacheService.getJSON<string[]>(cacheKey);
+    } catch {
+      permisosUsuario = null;
+    }
+
+    // 4) Si no había cache, obtener de RolesService y cachear
+    if (!permisosUsuario) {
+      // Llamada a tu RolesService: firma tal como la programaste:
+      // async getPermissionsForRoles(tenantId: string, roleIds: string[]): Promise<string[]>
+      permisosUsuario = await this.rolesService.getPermissionsForRoles(
+        tenantId,
+        rolesIds,
+      );
+      // Guardar en cache 60 segundos
       await this.cacheService.setJSON(cacheKey, permisosUsuario, 60);
     }
 
-    // Verificamos que el permiso solicitado esté en la lista
-    if (!permisosUsuario.includes(permiso)) {
-      throw new ForbiddenException(`No tienes permiso: ${permiso}`);
+    // 5) Verificar que permisoRequerido esté en la lista
+    if (!permisosUsuario.includes(permisoRequerido)) {
+      throw new ForbiddenException(`No tienes permiso: ${permisoRequerido}`);
     }
-    // Si llegamos acá, el usuario tiene el permiso requerido → devolvemos void
+
+    // Si llegó hasta aquí, el permiso existe y dejamos continuar
+    return;
   }
 }

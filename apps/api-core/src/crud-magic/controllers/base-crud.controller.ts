@@ -52,11 +52,11 @@ import { Hacl, HaclGuard } from '../guards';
 @Controller() // La ruta base se especifica dinámicamente (ver Factory en CrudMagicModule)
 export class BaseCrudController {
   constructor(
-    private readonly entityName: string,
-    private readonly service: BaseCrudService,
-    private readonly filteringService: FilteringService,
-    private readonly sortingService: SortingService,
-    private readonly paginationService: PaginationService,
+  private readonly entityName: string,
+  private readonly service: BaseCrudService,
+  private readonly filteringService: FilteringService,
+  private readonly sortingService: SortingService,
+  private readonly paginationService: PaginationService,
   ) {}
 
   /**

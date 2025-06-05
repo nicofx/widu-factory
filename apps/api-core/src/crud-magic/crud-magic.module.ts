@@ -1,91 +1,47 @@
 // crud-magic/src/crud-magic.module.ts
 
-import { Global, DynamicModule, Module, Provider, Controller, Inject } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
+import { Global, Module, DynamicModule, Provider, Inject, Controller } from '@nestjs/common';
+import { MongooseModule, getModelToken } from '@nestjs/mongoose';
 
-// ── Importar los módulos que exponen los servicios utilizados por HaclService ──
+import { CrudMagicOptions } from './interfaces/crud-magic-options.interface';
+
 import { PermissionsModule } from '../modules/permissions/permissions.module';
 import { RolesModule } from '../modules/roles/roles.module';
 import { CacheModule as AppCacheModule } from '../common/cache/cache.module';
 
-// ── Servicios “core” de CrudMagic ──
-import {
-  FilteringService,
-  SortingService,
-  PaginationService,
-  SoftDeleteService,
-  RelationsService,
-  ImportExportService,
-  BulkOpsService,
-  I18nService,
-  MetricsService,
-  HooksService,
-} from './services';
-
-// ── Guards y servicios específicos ──
-import { RateLimitGuard } from './guards/rate-limit.guard';
+// Servicios “core”
+import { FilteringService } from './services/filtering.service';
+import { SortingService } from './services/sorting.service';
+import { PaginationService } from './services/pagination.service';
 import { HaclService } from './services/hacl.service';
+import { SoftDeleteService } from './services/soft-delete.service';
+import { RelationsService } from './services/relations.service';
+import { ImportExportService } from './services/import-export.service';
+import { BulkOpsService } from './services/bulk-ops.service';
+import { I18nService } from './services/i18n.service';
+import { MetricsService } from './services/metrics.service';
+import { HooksService } from './services/hooks.service';
+import { RateLimitGuard } from './guards/rate-limit.guard';
 
-// ── Clase base para servicios y controladores ──
 import { BaseCrudService } from './services/base-crud.service';
 import { BaseCrudController } from './controllers/base-crud.controller';
-
-// ── Interfaces ──
 import { EntityFeature } from './interfaces/entity-feature.interface';
-import { CrudMagicOptions } from './interfaces/crud-magic-options.interface';
+import { Model } from 'mongoose';
+import { CachePluginService } from './services';
 
-/**
- * CrudMagicModule
- *
- * Módulo “global” (por @Global) que:
- *  - En forRoot(): registra opciones globales y proveedores centrales
- *  - En forFeature(): genera dinámicamente servicios + controladores CRUD por entidad
- */
 @Global()
 @Module({})
 export class CrudMagicModule {
-  /**
-   * forRoot(options)
-   *
-   * - Registra providers comunes (FilteringService, HaclService, etc.)
-   * - IMPORTA explícitamente PermissionsModule, RolesModule y AppCacheModule,
-   *   porque HaclService necesita PermissionsService, RolesService y CacheService en su constructor.
-   */
   static forRoot(options: CrudMagicOptions): DynamicModule {
-    const optionsProvider: Provider = {
-      provide: 'CRUD_MAGIC_OPTIONS',
-      useValue: options,
-    };
-
     return {
       module: CrudMagicModule,
       imports: [
-        // MongooseModule importado “a secas” para permitir esquemas dinámicos en forFeature
-        MongooseModule,
-        // Estos tres módulos exponen los servicios que HaclService inyecta:
         PermissionsModule,
         RolesModule,
         AppCacheModule,
       ],
       providers: [
-        optionsProvider,
-
-        // ── Proveedores “core” del CRUD mágico ──
-        FilteringService,
-        SortingService,
-        PaginationService,
-        HaclService,           // inyecta internamente PermissionsService, RolesService, CacheService
-        SoftDeleteService,
-        RelationsService,
-        ImportExportService,
-        BulkOpsService,
-        I18nService,
-        MetricsService,
-        HooksService,
-        RateLimitGuard,
-      ],
-      exports: [
-        // Exportar todos los servicios para que estén disponibles globalmente en toda la app
+        { provide: 'CRUD_MAGIC_OPTIONS', useValue: options },
         FilteringService,
         SortingService,
         PaginationService,
@@ -97,127 +53,145 @@ export class CrudMagicModule {
         I18nService,
         MetricsService,
         HooksService,
+        CachePluginService,
+        RateLimitGuard,
+      ],
+      exports: [
+        'CRUD_MAGIC_OPTIONS',
+        FilteringService,
+        SortingService,
+        PaginationService,
+        HaclService,
+        SoftDeleteService,
+        RelationsService,
+        ImportExportService,
+        BulkOpsService,
+        I18nService,
+        MetricsService,
+        HooksService,
+        CachePluginService,
         RateLimitGuard,
       ],
     };
   }
 
-  /**
-   * forFeature(entities)
-   *
-   * Por cada EntityFeature que recibimos:
-   *  1) Registramos el esquema con MongooseModule.forFeature(...)
-   *  2) Creamos un provider “CRUD_SERVICE_<ENTITY>” que instancia BaseCrudService
-   *  3) Generamos dinámicamente una clase @Controller("<route>") que extiende BaseCrudController
-   *     y usa @Inject("CRUD_SERVICE_<ENTITY>") para inyectar exactamente el servicio correcto.
-   */
-  static forFeature(entities: EntityFeature[]): DynamicModule {
-    console.log(
-      '⏩ [CrudMagic] forFeature se llamó con estas entidades:',
-      entities.map(e => e.name),
-    );
+  static forFeature(features: EntityFeature[]): DynamicModule {
+    const providers: Provider[] = [];
+    const controllers = [];
 
-    // 1) Registrar cada esquema en MongooseModule
-    const mongooseImports = entities.map(feat =>
-      MongooseModule.forFeature([{ name: feat.name, schema: feat.schema }]),
-    );
+    for (const feat of features) {
+      // ------------------------------
+      // 1) Registrar el esquema Mongoose
+      // ------------------------------
+      MongooseModule.forFeature([{ name: feat.name, schema: feat.schema }]);
 
-    // 2) Crear proveedores de servicio (uno por entidad)
-    const serviceProviders: Provider[] = entities.map(feat => {
-      const token = `CRUD_SERVICE_${feat.name.toUpperCase()}`;
-      console.log(
-        ` • [CrudMagic] Creando proveedor para BaseCrudService de "${feat.name}" → token: ${token}`,
-      );
+      // ------------------------------
+      // 2) Provider para “entityName” (valor constante)
+      // ------------------------------
+      const entityNameProvider: Provider = {
+        provide: `ENTITY_NAME_${feat.name.toUpperCase()}`,
+        useValue: feat.name,
+      };
 
-      return {
-        provide: token,
-        // useFactory recibe todos los servicios que BaseCrudService necesita:
+      // ------------------------------
+      // 3) Provider para “feature” (EntityFeature)
+      // ------------------------------
+      const featureProvider: Provider = {
+        provide: `FEATURE_${feat.name.toUpperCase()}`,
+        useValue: feat,
+      };
+
+      providers.push(entityNameProvider, featureProvider);
+
+      // ------------------------------
+      // 4) Provider dinámico para BaseCrudService (solo 12 parámetros)
+      // ------------------------------
+      const serviceProvider: Provider = {
+        provide: `CRUD_SERVICE_${feat.name.toUpperCase()}`,
         useFactory: (
-          filtering: FilteringService,
-          hacl: HaclService,
-          softDelete: SoftDeleteService,
-          relations: RelationsService,
-          importExport: ImportExportService,
-          bulkOps: BulkOpsService,
-          i18n: I18nService,
-          metrics: MetricsService,
-          hooks: HooksService,
+          model: Model<any>,             //  1) Model<Mongoose>
+          entityName: string,            //  2) el string con el nombre de la entidad
+          feature: EntityFeature,        //  3) la definición EntityFeature
+          filtering: FilteringService,   //  4)
+          hacl: HaclService,             //  5)
+          softDelete: SoftDeleteService, //  6)
+          relations: RelationsService,   //  7)
+          importExport: ImportExportService, //  8)
+          bulkOps: BulkOpsService,       //  9)
+          i18n: I18nService,             // 10)
+          metrics: MetricsService,       // 11)
+          hooks: HooksService,           // 12)
         ) => {
+          // ‣ Llamamos EXACTAMENTE a los 12 parámetros que espera el constructor:
           return new BaseCrudService(
-            feat.name,
-            feat,
-            filtering,
-            hacl,
-            softDelete,
-            relations,
-            importExport,
-            bulkOps,
-            i18n,
-            metrics,
-            hooks,
+            model,         //  1
+            entityName,    //  2
+            feature,       //  3
+            filtering,     //  4
+            hacl,          //  5
+            softDelete,    //  6
+            relations,     //  7
+            importExport,  //  8
+            bulkOps,       //  9
+            i18n,          // 10
+            metrics,       // 11
+            hooks,         // 12
           );
         },
         inject: [
-          FilteringService,
-          HaclService,
-          SoftDeleteService,
-          RelationsService,
-          ImportExportService,
-          BulkOpsService,
-          I18nService,
-          MetricsService,
-          HooksService,
+          getModelToken(feat.name),               //  1)
+          `ENTITY_NAME_${feat.name.toUpperCase()}`,//  2)
+          `FEATURE_${feat.name.toUpperCase()}`,    //  3)
+          FilteringService,                       //  4)
+          HaclService,                            //  5)
+          SoftDeleteService,                      //  6)
+          RelationsService,                       //  7)
+          ImportExportService,                    //  8)
+          BulkOpsService,                         //  9)
+          I18nService,                            // 10)
+          MetricsService,                         // 11)
+          HooksService,                           // 12)
         ],
       };
-    });
 
-    // 3) Generar dinámicamente la clase @Controller para cada entidad
-    const controllerClasses: any[] = entities.map(feat => {
-      const routePath = feat.name.toLowerCase();
-      console.log(
-        ` • [CrudMagic] Generando clase @Controller("${routePath}") que extiende BaseCrudController`,
-      );
+      providers.push(serviceProvider);
 
-      @Controller(routePath)
+      // ------------------------------
+      // 5) Controlador dinámico
+      // ------------------------------
+      @Controller(feat.name.toLowerCase())
       class GeneratedCrudController extends BaseCrudController {
         constructor(
-          // 1er parámetro: inyectamos explícitamente el token “CRUD_SERVICE_<ENTITY>”
           @Inject(`CRUD_SERVICE_${feat.name.toUpperCase()}`)
           crudService: BaseCrudService,
-
-          // El resto: se inyecta automáticamente por tipo
           filteringService: FilteringService,
           sortingService: SortingService,
           paginationService: PaginationService,
           rateLimitGuard: RateLimitGuard,
         ) {
-          // El constructor de BaseCrudController debe esperar estos 5 parámetros en este orden:
-          super(feat.name, crudService, filteringService, sortingService, paginationService);
-          console.log(
-            `  → [CrudMagic] Se instanció GeneratedCrudController para "${feat.name}"`,
+          super(
+            feat.name,
+            crudService,
+            filteringService,
+            sortingService,
+            paginationService,
           );
         }
       }
+      controllers.push(GeneratedCrudController);
+    }
 
-      return GeneratedCrudController;
-    });
-
-    console.log(
-      `⏩ [CrudMagic] Devolver DynamicModule con Controllers:`,
-      controllerClasses.map(c => c?.name),
-      'y Providers:',
-      serviceProviders.map(p => (p as any).provide),
-    );
-
-    // 4) Devolvemos el DynamicModule completo:
     return {
       module: CrudMagicModule,
-      imports: [...mongooseImports],
-      providers: [...serviceProviders],
-      controllers: [...controllerClasses],
-      // Hacemos export de todos los tokens “CRUD_SERVICE_<ENTITY>” para que estén disponibles si alguien
-      // quisiera inyectarlos por separado. (Por ejemplo, si otro módulo quisiera usar ese servicio.)
-      exports: serviceProviders.map(p => (p as any).provide as string),
+      imports: [
+        AppCacheModule,
+        ...features.map((f) =>
+          MongooseModule.forFeature([{ name: f.name, schema: f.schema }]),
+        ),
+      ],
+      providers,
+      controllers,
+      exports: providers.map((p) => (p as any).provide as string),
     };
   }
 }

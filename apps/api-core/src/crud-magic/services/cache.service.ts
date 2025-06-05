@@ -1,27 +1,32 @@
 // crud-magic/src/services/cache-plugin.service.ts
 
 import { Injectable } from '@nestjs/common';
+import { CacheService } from '../../common/cache/cache.service';
 
-/**
- * CachePluginService
- *
- * - get(cacheKey: string): Promise<any>
- * - set(cacheKey: string, value: any, ttl: number): Promise<void>
- * - del(cacheKeyPattern: string): Promise<void>
- *
- * Sprint 4: implementar usando el CacheService global (Redis) para almacenar resultados de findAll/findOne.
- */
 @Injectable()
 export class CachePluginService {
-  async get(cacheKey: string): Promise<any> {
-    throw new Error('CachePluginService.get: not implemented');
+  constructor(private readonly cacheService: CacheService) {}
+
+  /**
+   * Intenta leer la clave `cacheKey` desde Redis y parsearla como JSON.
+   * Si no existe o hay error, devuelve null.
+   */
+  async get<T>(cacheKey: string): Promise<T | null> {
+    return await this.cacheService.getJSON<T>(cacheKey);
   }
 
+  /**
+   * Guarda `value` serializado en JSON bajo la clave `cacheKey` con TTL en segundos.
+   */
   async set(cacheKey: string, value: any, ttlSeconds: number): Promise<void> {
-    throw new Error('CachePluginService.set: not implemented');
+    await this.cacheService.setJSON(cacheKey, value, ttlSeconds);
   }
 
+  /**
+   * Elimina todas las claves que coincidan con `cacheKeyPattern`.
+   * Si viene con '*', elimina múltiples; si no, elimina la clave exacta.
+   */
   async del(cacheKeyPattern: string): Promise<void> {
-    throw new Error('CachePluginService.del: not implemented');
+    await this.cacheService.del(cacheKeyPattern);
   }
 }

@@ -40,8 +40,16 @@ export interface CrudMagicOptions {
 
   hooks?: {
     // Hooks globales que se apliquen a todas las entidades
-    beforeCreate?: string[];
-    afterCreate?: string[];
+    beforeCreate?:   string[];
+    afterCreate?:    string[];
+    beforeUpdate?:   string[];
+    afterUpdate?:    string[];
+    beforeDelete?:   string[];
+    afterDelete?:    string[];
+    beforeBulkCreate?: string[];
+    afterBulkCreate?:  string[];
+    beforeBulkUpdate?: string[];
+    afterBulkUpdate?:  string[];
     // etc…
   };
 }
