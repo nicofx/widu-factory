@@ -34,6 +34,7 @@ import { TenantsModule } from './modules/tenants/tenants.module';
 import { SeederModule } from './common/seeder/seeder.module';
 import { CrudMagicModule } from './crud-magic';
 import { ProjectsModule } from './logic/projects/projects.module';
+import { CrudMagicLogger } from './crud-magic/interceptors/crud-logger.interceptor';
 // import { ThrottlerModule } from '@nestjs/throttler';
 
 @Module({
@@ -118,6 +119,10 @@ import { ProjectsModule } from './logic/projects/projects.module';
     {
       provide: 'APP_INTERCEPTOR',
       useClass: AuditInterceptor,
+    },
+    {
+      provide: 'APP_INTERCEPTOR',
+      useClass: CrudMagicLogger,
     },
   ],
 })

@@ -6,19 +6,19 @@ import { Document, Types } from 'mongoose';
 export class User extends Document {
   @Prop({ required: true })
   tenantId!: string;
-
+  
   @Prop({ required: true })
   email!: string;
-
+  
   @Prop({ required: true })
   passwordHash!: string;
-
+  
   @Prop({ type: [Types.ObjectId], ref: 'Role', default: [] })
   roles!: Types.ObjectId[];
-
+  
   @Prop({ type: Types.ObjectId, ref: 'Plan', default: null })
   plan!: Types.ObjectId;
-
+  
   @Prop({ type: Object, default: {} })
   metadata!: {
     name?: string;
@@ -26,6 +26,22 @@ export class User extends Document {
     avatarUrl?: string;
     [key: string]: any;
   };
+  
+  @Prop({ default: false })
+  emailVerified!: boolean;
+  
+  @Prop({ type: Date, default: null })
+  deletedAt!: Date | null;
+  
+  @Prop({ default: false })
+  deleted!: boolean;
+  
+  @Prop({ default: false })
+  disabled!: boolean;
+  @Prop() name?: string;
+  @Prop() phone?: string;
+  @Prop() avatarUrl?: string;
+  @Prop() bio?: string;
 }
 
 export const UserSchema = SchemaFactory.createForClass(User);

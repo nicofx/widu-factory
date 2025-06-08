@@ -13,17 +13,17 @@ export class MailerService {
   private transporter: nodemailer.Transporter | undefined;
   private readonly logger = new Logger(MailerService.name);
   private useSES: boolean;
-
+  
   constructor(private readonly configService: ConfigService) {
     // Elegir entre SMTP o AWS SES según variable de entorno
     this.useSES = configService.get<string>('MAIL_PROVIDER') === 'ses';
-
+    
     if (this.useSES) {
       // Configuración de AWS SES
       const region = configService.get<string>('AWS_REGION');
       const accessKeyId = configService.get<string>('AWS_ACCESS_KEY_ID');
       const secretAccessKey = configService.get<string>('AWS_SECRET_ACCESS_KEY');
-
+      
       // No usamos nodemailer en este caso, sino el SDK de AWS
       this.transporter = undefined;
     } else {
@@ -32,7 +32,7 @@ export class MailerService {
       const port = configService.get<number>('SMTP_PORT');
       const user = configService.get<string>('SMTP_USER');
       const pass = configService.get<string>('SMTP_PASS');
-
+      
       this.transporter = nodemailer.createTransport({
         host,
         port,
@@ -41,19 +41,20 @@ export class MailerService {
       });
     }
   }
-
+  
   private async renderTemplate(
     templateName: string,
     context: Record<string, any>,
   ): Promise<string> {
     const filePath = join(__dirname, '../../mail-templates', `${templateName}.ejs`);
+    console.log('[MAILER] Buscando template en:', filePath); // 👈 DEBUG
     const templateStr = await readFile(filePath, 'utf-8');
     return ejs.render(templateStr, context);
   }
-
+  
   /**
-   * Envío genérico de correo.
-   */
+  * Envío genérico de correo.
+  */
   private async sendMail(
     to: string,
     subject: string,
@@ -71,7 +72,7 @@ export class MailerService {
         '',
         html,
       ].join('\n');
-
+      
       const command = new SendRawEmailCommand({
         RawMessage: { Data: Buffer.from(rawMessage) },
       });
@@ -99,10 +100,10 @@ export class MailerService {
       }
     }
   }
-
+  
   /**
-   * Enviar correo de verificación de cuenta.
-   */
+  * Enviar correo de verificación de cuenta.
+  */
   async sendVerificationEmail(
     tenantId: string,
     toEmail: string,
@@ -111,18 +112,18 @@ export class MailerService {
   ): Promise<void> {
     const frontendUrl = this.configService.get<string>('FRONTEND_URL');
     const verificationLink = `${frontendUrl}/verify-email?token=${token}&tenant=${tenantId}`;
-
+    
     const html = await this.renderTemplate('verify-account', {
       name,
       verificationLink,
     });
-
+    
     await this.sendMail(toEmail, 'Verifica tu cuenta en WiduFactory', html);
   }
-
+  
   /**
-   * Enviar correo de restablecimiento de contraseña.
-   */
+  * Enviar correo de restablecimiento de contraseña.
+  */
   async sendPasswordResetEmail(
     tenantId: string,
     toEmail: string,
@@ -131,18 +132,18 @@ export class MailerService {
   ): Promise<void> {
     const frontendUrl = this.configService.get<string>('FRONTEND_URL');
     const resetLink = `${frontendUrl}/reset-password?token=${token}&tenant=${tenantId}`;
-
+    
     const html = await this.renderTemplate('reset-password', {
       name,
       resetLink,
     });
-
+    
     await this.sendMail(toEmail, 'Restablece tu contraseña en WiduFactory', html);
   }
-
+  
   /**
-   * Notificación de cambio de rol.
-   */
+  * Notificación de cambio de rol.
+  */
   async sendRoleChangeNotice(
     tenantId: string,
     toEmail: string,
@@ -154,5 +155,21 @@ export class MailerService {
       newRole,
     });
     await this.sendMail(toEmail, 'Tu rol ha cambiado en WiduFactory', html);
+  }
+  
+  /**
+  * Enviar notificación de cambio de contraseña.
+  * Se invoca después de resetear la password.
+  */
+  async sendPasswordChangedNotification(
+    tenantId: string,
+    toEmail: string,
+    name: string,
+  ) {
+    // Usá un template simple tipo 'password-changed.ejs' en mail-templates
+    const html = await this.renderTemplate('password-changed', {
+      name,
+    });
+    await this.sendMail(toEmail, 'Tu contraseña ha sido cambiada', html);
   }
 }

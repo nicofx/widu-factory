@@ -9,6 +9,8 @@ import { UsersService } from './users.service';
 import { UsersController } from './users.controller';
 import { User, UserSchema } from './schemas/user.schema';
 import { MailerModule } from '../../common/mailer/mailer.module';
+import { SecurityModule } from '../../common/security/security.module';
+import { EmailVerificationModule } from '../auth/email-verification.module';
 
 @Module({
   imports: [
@@ -36,6 +38,8 @@ import { MailerModule } from '../../common/mailer/mailer.module';
       },
       inject: [ConfigService],
     }),
+    SecurityModule,
+    EmailVerificationModule,
   ],
   controllers: [UsersController],
   providers: [UsersService],

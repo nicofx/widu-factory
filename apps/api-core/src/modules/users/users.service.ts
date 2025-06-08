@@ -19,6 +19,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { MailerService } from '../../common/mailer/mailer.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
+import { EmailVerificationService } from '../auth/services/email-verification.service';
 
 // Convertimos la versión callback de scrypt a una que devuelve promise
 const scrypt = promisify(_scrypt);
@@ -30,6 +31,7 @@ export class UsersService {
     private readonly mailerService: MailerService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly emailVerificationService: EmailVerificationService, // 👈 NUEVO
   ) {}
   
   /**
@@ -39,6 +41,7 @@ export class UsersService {
   * @returns El usuario creado, sin el campo passwordHash.
   */
   async create(tenantId: string, createUserDto: CreateUserDto): Promise<User> {
+    
     // 1) validar si ya existe correo
     const exists = await this.userModel.findOne({ tenantId, email: createUserDto.email });
     if (exists) throw new ConflictException('Email ya registrado.');
@@ -68,6 +71,22 @@ export class UsersService {
     const verificationToken = this.jwtService.sign(payload, {
       secret: this.configService.get<string>('JWT_SECRET'),
       expiresIn,
+    });
+    
+    const expiresMs =
+    (typeof expiresIn === 'string' && expiresIn.endsWith('h'))
+    ? parseInt(expiresIn) * 60 * 60 * 1000
+    : 24 * 60 * 60 * 1000; // fallback 24h
+    
+    const expiresAt = new Date(Date.now() + expiresMs);
+    
+    // Guardamos referencia del token de verificación
+    await this.emailVerificationService.create({
+      userId: savedUser._id.toString(),
+      tenantId: savedUser.tenantId,
+      email: savedUser.email,
+      token: verificationToken,
+      expiresAt,
     });
     
     // 4) enviar correo de verificación
@@ -151,8 +170,8 @@ export class UsersService {
     user.metadata = {
       ...user.metadata,
       ...(updateUserDto.name !== undefined && { name: updateUserDto.name }),
-      ...(updateUserDto.phone !== undefined && { phone: updateUserDto.phone }),
-      ...(updateUserDto.avatarUrl !== undefined && { avatarUrl: updateUserDto.avatarUrl }),
+      // ...(updateUserDto.phone !== undefined && { phone: updateUserDto.phone }),
+      // ...(updateUserDto.avatarUrl !== undefined && { avatarUrl: updateUserDto.avatarUrl }),
     };
     
     const updated = await user.save();
@@ -228,27 +247,6 @@ export class UsersService {
   }
   
   /**
-  * Asigna un plan (planId) a un usuario en este tenant.
-  */
-  async setPlan(
-    tenantId: string,
-    userId: string,
-    planId: string,
-  ): Promise<void> {
-    if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(planId)) {
-      throw new BadRequestException('ID inválido (usuario o plan)');
-    }
-    const user = await this.userModel
-    .findOne({ _id: userId, tenantId })
-    .exec();
-    if (!user) {
-      throw new NotFoundException(`Usuario con ID "${userId}" no encontrado en este tenant.`);
-    }
-    user.plan = new Types.ObjectId(planId);
-    await user.save();
-  }
-  
-  /**
   * Método de utilidad para AuthModule: buscar usuario por email+tenantId
   * (necesario para validar credenciales)
   */
@@ -318,5 +316,60 @@ export class UsersService {
     if (result.matchedCount === 0) {
       throw new NotFoundException('Usuario no encontrado.');
     }
+  }
+  
+  // 🔥 Sprint-1
+  async markEmailVerified(tenantId: string, userId: string) {
+    await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { emailVerified: true },
+    );
+  }
+  
+  // 🔥 PATCH setRoles & setPlan
+  async setRoles(tenantId: string, userId: string, roleIds: string[]) {
+    if (!Types.ObjectId.isValid(userId)) throw new BadRequestException('ID usuario inválido');
+    const rolesObjId = roleIds.map((id) => new Types.ObjectId(id));
+    const res = await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { roles: rolesObjId },
+    );
+    if (res.matchedCount === 0) throw new NotFoundException('Usuario no encontrado.');
+  }
+  
+  async setPlan(tenantId: string, userId: string, planId: string) {
+    if (!Types.ObjectId.isValid(userId) || !Types.ObjectId.isValid(planId)) {
+      throw new BadRequestException('ID inválido');
+    }
+    const res = await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { plan: new Types.ObjectId(planId) },
+    );
+    if (res.matchedCount === 0) throw new NotFoundException('Usuario no encontrado.');
+  }
+  
+  // 🔥 PATCH helper sin select
+  async findOneRaw(tenantId: string, userId: string) {
+    return this.userModel.findOne({ _id: userId, tenantId }).exec();
+  }
+  
+  /**
+  * Buscar usuario por tenantId + userId (_id de Mongo como string)
+  * Retorna el documento completo, o null si no existe.
+  */
+  async findById(tenantId: string, userId: string): Promise<User | null> {
+    if (!userId || !tenantId) return null;
+    // Puede venir en string o ObjectId
+    return this.userModel.findOne({
+      _id: userId,
+      tenantId: tenantId,
+    }).exec();
+  }
+  
+  async updateAvatar(userId: string, tenantId: string, avatarUrl: string): Promise<void> {
+    await this.userModel.updateOne(
+      { _id: userId, tenantId },
+      { $set: { avatarUrl } }
+    );
   }
 }

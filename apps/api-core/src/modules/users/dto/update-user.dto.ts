@@ -20,12 +20,4 @@ export class UpdateUserDto {
   @IsOptional()
   @IsString()
   readonly name?: string;
-
-  @IsOptional()
-  @IsString()
-  readonly phone?: string;
-
-  @IsOptional()
-  @IsString()
-  readonly avatarUrl?: string;
 }

@@ -24,12 +24,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     * Después de verificar la firma, Passport llama a validate() con el payload decodificado.
     * Aquí retornamos un objeto “user” que se inyectará en request.user.
     */
+    // 🔥 PATCH validate()
     async validate(payload: any) {
-        // payload: { sub: <userId>, tenantId: <string>, roles: [...], iat, exp }
+          console.log('JWT payload', payload);
+        // payload contiene sub, tenantId, roles, permissions, sessionId, email
         return {
             userId: payload.sub,
             tenantId: payload.tenantId,
             roles: payload.roles,
+            permissions: payload.permissions,
+            sessionId: payload.sessionId,
+            email: payload.email,
         };
     }
 }

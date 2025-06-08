@@ -28,6 +28,8 @@ import { BaseCrudController } from './controllers/base-crud.controller';
 import { EntityFeature } from './interfaces/entity-feature.interface';
 import { Model } from 'mongoose';
 import { CachePluginService } from './services';
+import { validateCrudConfig } from './utils/config-validator';
+import { CrudPreset, PRESETS } from './constants/presets';
 
 @Global()
 @Module({})
@@ -74,17 +76,23 @@ export class CrudMagicModule {
       ],
     };
   }
-
-  static forFeature(features: EntityFeature[]): DynamicModule {
+  
+  static forFeature(rawFeatures: Array<EntityFeature & { preset?: CrudPreset }>): DynamicModule {
+    const features = rawFeatures.map((f) => {
+      const base = f.preset ? PRESETS[f.preset] : {};
+      return { ...base, ...f } as EntityFeature;
+    });
+    
+    features.forEach(validateCrudConfig);
     const providers: Provider[] = [];
     const controllers = [];
-
+    
     for (const feat of features) {
       // ------------------------------
       // 1) Registrar el esquema Mongoose
       // ------------------------------
       MongooseModule.forFeature([{ name: feat.name, schema: feat.schema }]);
-
+      
       // ------------------------------
       // 2) Provider para “entityName” (valor constante)
       // ------------------------------
@@ -92,7 +100,7 @@ export class CrudMagicModule {
         provide: `ENTITY_NAME_${feat.name.toUpperCase()}`,
         useValue: feat.name,
       };
-
+      
       // ------------------------------
       // 3) Provider para “feature” (EntityFeature)
       // ------------------------------
@@ -100,9 +108,9 @@ export class CrudMagicModule {
         provide: `FEATURE_${feat.name.toUpperCase()}`,
         useValue: feat,
       };
-
+      
       providers.push(entityNameProvider, featureProvider);
-
+      
       // ------------------------------
       // 4) Provider dinámico para BaseCrudService (solo 12 parámetros)
       // ------------------------------
@@ -153,9 +161,9 @@ export class CrudMagicModule {
           HooksService,                           // 12)
         ],
       };
-
+      
       providers.push(serviceProvider);
-
+      
       // ------------------------------
       // 5) Controlador dinámico
       // ------------------------------
@@ -180,18 +188,18 @@ export class CrudMagicModule {
       }
       controllers.push(GeneratedCrudController);
     }
-
+    
     return {
       module: CrudMagicModule,
       imports: [
         AppCacheModule,
         ...features.map((f) =>
           MongooseModule.forFeature([{ name: f.name, schema: f.schema }]),
-        ),
-      ],
-      providers,
-      controllers,
-      exports: providers.map((p) => (p as any).provide as string),
-    };
-  }
+      ),
+    ],
+    providers,
+    controllers,
+    exports: providers.map((p) => (p as any).provide as string),
+  };
+}
 }

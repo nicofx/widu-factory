@@ -1,4 +1,3 @@
-version: '3.8'
 
 services:
   mongo:
@@ -8,7 +7,7 @@ services:
     ports:
       - "27017:27017"
     volumes:
-      - /var/widu/mongo-data:/data/db
+      - mongo_data:/data/db
 
   redis:
     image: redis:7
@@ -34,7 +33,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     volumes:
-      - ./config/.env.dev:/app/.env
+      - ./config/.env.dev:/app/apps/api-core/config/.env
 
   frontend-web:
     build:
@@ -42,6 +41,8 @@ services:
       dockerfile: apps/frontend-web/Dockerfile
     container_name: widu-web
     restart: always
+    ports:
+      - "4200:4200"
     depends_on:
       - api-core
 

@@ -30,11 +30,11 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 @Controller('users')
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
-
+  
   /**
-   * Crear nuevo usuario:
-   * Sólo rol 'admin' puede hacerlo.
-   */
+  * Crear nuevo usuario:
+  * Sólo rol 'admin' puede hacerlo.
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
   @Post()
@@ -46,11 +46,11 @@ export class UsersController {
     const tenantId = tenantIdHeader?.trim() || 'default';
     return await this.usersService.create(tenantId, createUserDto);
   }
-
+  
   /**
-   * Listar usuarios:
-   * Puede hacerlo 'admin' o 'manager'.
-   */
+  * Listar usuarios:
+  * Puede hacerlo 'admin' o 'manager'.
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin', 'manager')
   @Get()
@@ -65,9 +65,9 @@ export class UsersController {
   }
   
   /**
-   * Obtener usuario por ID:
-   * Puede verlo 'admin' o el propio usuario (comparar userId).
-   */
+  * Obtener usuario por ID:
+  * Puede verlo 'admin' o el propio usuario (comparar userId).
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Get(':id')
   async findOne(
@@ -83,12 +83,12 @@ export class UsersController {
     }
     return await this.usersService.findOne(tenantId, id);
   }
-
+  
   /**
-   * Actualizar usuario:
-   * 'admin' puede actualizar a cualquiera; 
-   * usuario normal sólo puede actualizar su propio perfil.
-   */
+  * Actualizar usuario:
+  * 'admin' puede actualizar a cualquiera; 
+  * usuario normal sólo puede actualizar su propio perfil.
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Patch(':id')
   async update(
@@ -104,11 +104,40 @@ export class UsersController {
     }
     return await this.usersService.update(tenantId, id, updateUserDto);
   }
-
+  
+  
+  // 🔥 Sprint-1 – añadir después de update()
+  
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @Patch(':id/roles')
+  async patchRoles(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body('roles') roles: string[],
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.usersService.setRoles(tenantId, id, roles);
+  }
+  
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
+  @Patch(':id/plan')
+  async patchPlan(
+    @Headers('x-tenant-id') tenantIdHeader: string,
+    @Param('id') id: string,
+    @Body('plan') plan: string,
+  ) {
+    const tenantId = tenantIdHeader?.trim() || 'default';
+    await this.usersService.setPlan(tenantId, id, plan);
+  }
+  
+  
+  
   /**
-   * Eliminar usuario físico:
-   * Sólo 'admin'.
-   */
+  * Eliminar usuario físico:
+  * Sólo 'admin'.
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
   @Delete(':id')
@@ -120,11 +149,11 @@ export class UsersController {
     const tenantId = tenantIdHeader?.trim() || 'default';
     await this.usersService.remove(tenantId, id);
   }
-
+  
   /**
-   * Ver roles de un usuario:
-   * Sólo 'admin' o el propio usuario.
-   */
+  * Ver roles de un usuario:
+  * Sólo 'admin' o el propio usuario.
+  */
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
   @Get(':id/roles')

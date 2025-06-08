@@ -19,6 +19,10 @@ RUN pnpm build:docker
 # 5) Copiamos configs (.json) a dist/apps/api-core/config
 RUN cp -R config dist/apps/api-core/config
 
+# 5b) Copiamos mail-templates a dist/apps/api-core/mail-templates
+RUN cp -R mail-templates dist/apps/api-core/mail-templates
+RUN cp -R mail-templates dist/apps/api-core/src/mail-templates
+
 # 6) Exponemos puerto 3000
 EXPOSE 3000
 

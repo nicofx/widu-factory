@@ -15,6 +15,9 @@ import { JwtAuthGuard } from './jwt-auth.guard';
 import { UsersModule } from '../users/users.module';
 import { RolesModule } from '../roles/roles.module';
 import { SessionModule } from '../sessions/session.module';
+import { SecurityModule } from '../../common/security/security.module';
+import { EmailVerificationModule } from './email-verification.module';
+import { TenantsModule } from '../tenants/tenants.module';
 
 @Module({
   imports: [
@@ -40,6 +43,9 @@ import { SessionModule } from '../sessions/session.module';
     forwardRef(() => UsersModule),
     forwardRef(() => RolesModule),
     forwardRef(() => SessionModule), // ← aquí agregamos SessionModule
+    SecurityModule,
+    EmailVerificationModule,
+    TenantsModule,
   ],
   providers: [
     AuthService,

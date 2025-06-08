@@ -1,5 +1,4 @@
 # .github/workflows/ci.yml
-
 name: CI Pipeline
 
 on:
@@ -15,33 +14,50 @@ jobs:
       NODE_ENV: test
 
     steps:
-      - name: Checkout code
+      # ─────────────── Base ───────────────
+      - name: ⏬ Checkout repo
         uses: actions/checkout@v3
 
-      - name: Setup Node.js
+      - name: 🔧 Setup Node 20 + PNPM cache
         uses: actions/setup-node@v3
         with:
           node-version: 20
-          cache: 'pnpm'
+          cache: pnpm
 
-      - name: Install dependencies (root)
+      - name: 📦 Install root deps (lock-strict)
         run: pnpm install --frozen-lockfile
 
-      - name: Build API (root monorepo)
+      # ───────────── Lint & Unit tests ─────────────
+      - name: 🏗️ Build API (monorepo root)
         run: |
           cd apps/api-core
-          pnpm install
-          pnpm build:docker
+          pnpm build:docker      # 👈  compila con tsc (no publica imagen)
 
-      - name: Run lint (root)
+      - name: 🧹 Lint all
         run: pnpm lint
 
-      - name: Run unit tests (API)
+      - name: 🧪 Unit tests + coverage
         run: |
           cd apps/api-core
           pnpm test -- --coverage
-      - name: Upload coverage report
-        if: success()
+
+      # ───────────── Swagger & SDK ─────────────
+      - name: 📜 Generate Swagger JSON & TypeScript SDK
+        run: |
+          export GENERATE_SWAGGER=true
+          node dist/apps/api-core/main.js                 # crea docs/openapi.json
+          npx openapi-generator-cli generate \
+            -i docs/openapi.json \
+            -g typescript-axios \
+            -o libs/sdk
+
+      - name: 📤 Upload SDK artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: widu-sdk
+          path: libs/sdk
+
+      - name: 📤 Upload coverage
         uses: actions/upload-artifact@v3
         with:
           name: coverage-report
@@ -52,33 +68,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: ⏬ Checkout repo
         uses: actions/checkout@v3
 
-      - name: Setup Node.js
+      - name: 🔧 Setup Node 20 + PNPM cache
         uses: actions/setup-node@v3
         with:
           node-version: 20
-          cache: 'pnpm'
+          cache: pnpm
 
-      - name: Install dependencies (root)
+      - name: 📦 Install root deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build Docker image (sin cache)
+      - name: 🐋 Build Docker image (no-cache)
         run: |
           docker build \
             --build-arg NODE_ENV=production \
             -f apps/api-core/Dockerfile \
-            -t widu-factory-api-core:ci \
-            .
+            -t widu-factory-api-core:ci .
 
-      - name: Push image to Docker Hub (opcional)
+      # ─── Push opcional ───
+      - name: 🔑 Docker login
         if: github.event_name == 'push'
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}
-      - name: Tag & Push
+
+      - name: 🏷️ Tag & push image
         if: github.event_name == 'push'
         run: |
           docker tag widu-factory-api-core:ci yourdockerhubuser/widu-factory-api-core:latest
