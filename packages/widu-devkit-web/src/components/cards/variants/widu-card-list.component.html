@@ -1,0 +1,11 @@
+<widu-card [id]="id" class="space-y-2">
+  <div card-body>
+    <ul class="list-disc list-inside">
+      <li *ngFor="let item of items">
+        <ng-container
+          *ngTemplateOutlet="itemTpl; context: { $implicit: item }"
+        ></ng-container>
+      </li>
+    </ul>
+  </div>
+</widu-card>

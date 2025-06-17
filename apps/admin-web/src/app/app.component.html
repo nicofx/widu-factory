@@ -1,0 +1,35 @@
+<header
+  class="flex items-center gap-4 bg-gray-900 text-white px-4
+         sticky top-0 h-[var(--hdr)] z-60"
+>
+  <!-- ☰ solo en móvil -->
+<button class="text-2xl md:hidden" (click)="sp.toggle()">☰</button>
+
+  <h1 class="flex-1 text-center">🌟 Título de la Aplicación 🌟</h1>
+</header>
+
+<!-- Shell grid -->
+<div class="grid md:grid-cols-[auto_1fr]">
+  <!-- Sidebar -->
+<!-- app.component.html -->
+<button (click)="sp.toggle()">☰</button>
+
+<widu-side-panel
+  position="left"
+  width="18rem">
+
+  <!-- HEADER SLOT -->
+  <h3 panelHeader>Menú principal</h3>
+
+  <!-- CONTENIDO -->
+  <ul>
+    <li><a href="#">Dashboard</a></li>
+    <li><a href="#">Usuarios</a></li>
+  </ul>
+
+  <!-- FOOTER SLOT -->
+  <div panelFooter class="text-sm text-center">© 2025 WiduIT</div>
+</widu-side-panel>
+  <!-- Contenido -->
+  <main class="p-6 overflow-auto">Lorem ipsum dolor sit amet…</main>
+</div>

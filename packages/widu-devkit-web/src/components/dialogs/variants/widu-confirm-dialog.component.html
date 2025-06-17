@@ -1,0 +1,18 @@
+<widu-dialog [id]="id">
+  <div dialog-header class="text-lg font-bold">{{ title }}</div>
+  <div dialog-body class="mt-4">{{ message }}</div>
+  <div dialog-footer class="flex justify-end gap-2 mt-6">
+    <button
+      (click)="cancel.emit()"
+      class="px-4 py-2 bg-gray-200 rounded hover:bg-gray-300"
+    >
+      {{ cancelText }}
+    </button>
+    <button
+      (click)="confirm.emit()"
+      class="px-4 py-2 text-white bg-blue-600 rounded hover:bg-blue-700"
+    >
+      {{ confirmText }}
+    </button>
+  </div>
+</widu-dialog>

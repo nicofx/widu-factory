@@ -1,0 +1,22 @@
+<!-- src/app/shared/sidebar/sidebar.component.html -->
+<button class="sidebar__toggler" (click)="toggle()">
+  <i class="hamburger-icon"></i>
+</button>
+
+<nav class="sidebar__nav">
+  <ul>
+    <li *ngFor="let item of menuItems; trackBy: trackByLabel">
+      <div class="menu-item" (click)="item.children && (item.open = !item.open)">
+        <i *ngIf="item.icon" class="menu-item__icon" [ngClass]="item.icon"></i>
+        <span>{{ item.label }}</span>
+        <i *ngIf="item.children" class="chevron" [class.open]="item.open"></i>
+      </div>
+      <ul *ngIf="item.children && item.open" class="submenu">
+        <li *ngFor="let child of item.children">
+          <i *ngIf="child.icon" class="menu-item__icon" [ngClass]="child.icon"></i>
+          <span>{{ child.label }}</span>
+        </li>
+      </ul>
+    </li>
+  </ul>
+</nav>

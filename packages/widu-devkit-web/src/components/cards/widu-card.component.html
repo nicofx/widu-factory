@@ -1,0 +1,16 @@
+<!--
+  WiduCardComponent: Contenedor genérico.
+  Usa 4 slots:
+    [card-header], [card-media], [card-body], [card-footer].
+  Ejemplo de uso:
+    <widu-card id="myCard">
+      <div card-header>…</div>
+      <img card-media src="..."/>
+      <div card-body>…</div>
+      <div card-footer>…</div>
+    </widu-card>
+-->
+<ng-content select="[card-header]"></ng-content>
+<ng-content select="[card-media]"></ng-content>
+<ng-content select="[card-body]"></ng-content>
+<ng-content select="[card-footer]"></ng-content>

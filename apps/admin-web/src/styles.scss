@@ -1,0 +1,35 @@
+/* Tailwind layers */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* estilos globales de la app admin-web debajo … */
+/* Header fijo y ancho completo */
+.app-header {
+  @apply w-full bg-gray-900 text-white px-6 py-4 flex items-center shadow;
+  position: sticky;    /* queda arriba al hacer scroll */
+  top: 0;
+  z-index: 50;
+}
+
+/* Grid maestro ↓ */
+.layout {
+  display: grid;
+  grid-template-columns: 16rem 1fr; /* sidebar + contenido */
+  height: calc(100vh - 4rem);       /* viewport menos la altura del header (64 px -> 4rem) */
+}
+
+/* Cuando la barra colapsa */
+body.sidebar-collapsed .layout {
+  grid-template-columns: 4rem 1fr;
+}
+
+/* Area de contenido dividida mitad-mitad */
+.content {
+  @apply grid gap-4 p-6;
+  grid-template-columns: 1fr 1fr;   /* 50 % / 50 % */
+}
+
+.half      { @apply rounded bg-white shadow p-4; }
+.placeholder { @apply text-gray-700; }
+.widget-zone { /* estilos que quieras para el slot del widget */ }

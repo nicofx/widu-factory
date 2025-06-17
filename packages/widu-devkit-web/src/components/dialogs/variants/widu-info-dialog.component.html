@@ -1,0 +1,12 @@
+<widu-dialog [id]="id">
+  <div dialog-header class="text-lg font-bold">{{ title }}</div>
+  <div dialog-body class="mt-4">{{ content }}</div>
+  <div dialog-footer class="flex justify-end mt-6">
+    <button
+      (click)="close.emit()"
+      class="px-4 py-2 text-white bg-blue-600 rounded hover:bg-blue-700"
+    >
+      {{ closeText }}
+    </button>
+  </div>
+</widu-dialog>

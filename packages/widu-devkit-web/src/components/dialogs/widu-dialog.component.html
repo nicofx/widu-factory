@@ -1,0 +1,10 @@
+<!-- Overlay + centrar diálogo -->
+<div class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50">
+  <!-- Caja del diálogo -->
+  <div [ngClass]="['relative', width, bg, rounded, shadow, padding]">
+    <!-- Slots para header, body y footer -->
+    <ng-content select="[dialog-header]"></ng-content>
+    <ng-content select="[dialog-body]"></ng-content>
+    <ng-content select="[dialog-footer]"></ng-content>
+  </div>
+</div>

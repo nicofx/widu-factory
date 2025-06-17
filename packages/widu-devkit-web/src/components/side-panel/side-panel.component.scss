@@ -1,0 +1,70 @@
+/* ===========================================
+   Widu Side-Panel · styles
+   =========================================== */
+
+:host {
+  --panel-width: 20rem;   /* podés sobreescribirlo con el @Input width */
+  position: fixed;
+  top: 0;
+  bottom: 0;
+  z-index: 1050;
+  pointer-events: none;   /* desactiva clicks cuando está cerrado */
+}
+
+/* Anclaje según posición */
+:host.left  { left: 0;  }
+:host.right { right: 0; }
+
+/* ------------------ Backdrop ------------------ */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .4);
+  opacity: 0;
+  transition: opacity .3s ease;
+  pointer-events: none;
+}
+
+/* ------------------ Panel ------------------ */
+.panel {
+  position: absolute;
+  /* default → pegado al borde derecho */
+  inset: 0 0 0 auto;
+  width: var(--panel-width);
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  transform: translateX(100%);        /* oculto (derecha) */
+  transition: transform .3s ease;
+  pointer-events: auto;
+
+  /* variante izquierda */
+  :host.left & {
+    inset: 0 auto 0 0;                /* pegado al borde izquierdo */
+    transform: translateX(-100%);     /* oculto (izquierda) */
+  }
+}
+
+/* ------------------ Estado abierto ------------------ */
+:host.open            { pointer-events: auto; }
+:host.open .panel     { transform: translateX(0); }
+:host.open .backdrop  { opacity: 1; pointer-events: auto; }
+
+/* ------------------ Secciones ------------------ */
+.panel__header,
+.panel__footer { padding: 1rem; }
+
+.panel__body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 1rem;
+}
+
+/* ------------------ Botón cerrar ------------------ */
+.close-btn {
+  margin-left: auto;
+  background: none;
+  border: none;
+  font-size: 1.25rem;
+  cursor: pointer;
+}

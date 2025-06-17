@@ -1,0 +1,25 @@
+<div [class]="hostClasses()" (click)="onHostClick()">
+  <div class="widget-header" *ngIf="titleSig() || iconSig() || badgeDisplay()">
+    <i *ngIf="iconSig()" [class]="iconSig()"></i>
+    <span class="widget-title" *ngIf="titleSig()">{{ titleSig() }}</span>
+    <span class="widget-badge" *ngIf="badgeDisplay()">{{ badgeDisplay() }}</span>
+  </div>
+
+  <div class="widget-content">
+    <ng-container *ngIf="contentTemplateSig(); else textTpl">
+      <ng-container *ngTemplateOutlet="contentTemplateSig()"></ng-container>
+    </ng-container>
+    <ng-template #textTpl>
+      <p *ngIf="contentTextSig()">{{ contentTextSig() }}</p>
+    </ng-template>
+  </div>
+
+  <div class="widget-actions" *ngIf="actionsSig().length">
+    <button
+      *ngFor="let a of actionsSig()"
+      (click)="a.command()"
+      class="action-btn">
+      <i *ngIf="a.icon" [class]="a.icon"></i> {{ a.label }}
+    </button>
+  </div>
+</div>

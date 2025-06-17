@@ -1,3 +1,4 @@
+version: '3.8'
 
 services:
   mongo:
@@ -15,7 +16,12 @@ services:
     restart: always
     ports:
       - "6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command:
+      - redis-server
+      - '--save'
+      - ''
+      - '--appendonly'
+      - 'no'
 
   api-core:
     build:
@@ -36,15 +42,36 @@ services:
       - ./config/.env.dev:/app/apps/api-core/config/.env
 
   frontend-web:
-    build:
-      context: .
-      dockerfile: apps/frontend-web/Dockerfile
+    image: node:20
     container_name: widu-web
     restart: always
     ports:
       - "4200:4200"
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: >-
+      sh -c "npm install -g pnpm @angular/cli &&
+      cd apps/frontend-web &&
+      pnpm install &&
+      pnpm run start"
+
+  admin-web:
+    image: node:20
+    container_name: widu-admin-web
+    restart: always
+    ports:
+      - "4000:4000"
+    working_dir: /app
     depends_on:
       - api-core
+    volumes:
+      - .:/app
+    command: >-
+      sh -c "npm install -g pnpm @angular/cli &&
+      cd apps/admin-web &&
+      pnpm install &&
+      pnpm run start"
 
 volumes:
   mongo_data:

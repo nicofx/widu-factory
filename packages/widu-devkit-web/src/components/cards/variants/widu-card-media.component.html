@@ -1,0 +1,13 @@
+<widu-card [id]="id">
+  <div card-header *ngIf="title || subtitle">
+    <h3 class="text-lg font-bold">{{ title }}</h3>
+    <p class="text-sm text-gray-500">{{ subtitle }}</p>
+  </div>
+  <img card-media [src]="mediaSrc" [alt]="mediaAlt" class="w-full h-auto"/>
+  <div card-body>
+    <ng-content></ng-content>
+  </div>
+  <div card-footer *ngIf="footer" class="text-xs text-gray-600">
+    {{ footer }}
+  </div>
+</widu-card>
