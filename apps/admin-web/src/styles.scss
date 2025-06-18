@@ -1,27 +1,57 @@
-/* Tailwind layers */
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* estilos globales de la app admin-web debajo … */
-/* Header fijo y ancho completo */
-.app-header {
-  @apply w-full bg-gray-900 text-white px-6 py-4 flex items-center shadow;
-  position: sticky;    /* queda arriba al hacer scroll */
-  top: 0;
-  z-index: 50;
+:root {
+  --header-height: 64px;
+  --footer-height: 64px;
+  --transition-speed: .3s;
 }
 
-/* Grid maestro ↓ */
+/* ① Reset UA margin: elimina el 8px por defecto */
+body {
+  margin: 0;
+  font-family: sans-serif;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ② Grid layout header/body/footer */
 .layout {
   display: grid;
-  grid-template-columns: 16rem 1fr; /* sidebar + contenido */
-  height: calc(100vh - 4rem);       /* viewport menos la altura del header (64 px -> 4rem) */
+  grid-template-rows: var(--header-height) 1fr var(--footer-height);
+  height: 100vh;
+  margin: 0;
 }
 
-/* Transición suave para el layout */
-.app-content { transition: margin-left .3s, margin-right .3s; }
+.layout__header {
+  background: lightcoral;
+  display: flex; align-items: center; padding: 0 1rem;
+}
 
-/* Empuje automático usando var actualizada por el servicio */
-body.panel-open-left  .app-content { margin-left:  var(--sidebar-offset); }
-body.panel-open-right .app-content { margin-right: var(--sidebar-offset); }
+.layout__body {
+  position: relative;      /* contenedor de nuestro panel absolute */
+  display: flex;
+  overflow: hidden;
+}
+
+.layout__content {
+  flex: 1 1 auto;
+  background: lightgreen;
+  padding: 1rem;
+  margin: 0;
+  transition: margin var(--transition-speed) ease;
+  overflow: auto;
+}
+
+.layout__footer {
+  background: lightblue;
+  display: flex; align-items: center; justify-content: center;
+  margin: 0; padding: .5rem;
+}
+
+/* ③ Push en desktop */
+@media (min-width: 768px) {
+  .layout__body > widu-side-panel.left.open  + .layout__content {
+    margin-left: var(--sidebar-offset);
+  }
+  .layout__body > widu-side-panel.right.open + .layout__content {
+    margin-right: var(--sidebar-offset);
+  }
+}

@@ -1,17 +1,13 @@
-<!-- Backdrop: siempre overlay y clic para close() -->
-<div
-  class="backdrop"
-  *ngIf="open"
-  (click)="close()">
-</div>
-
+<!-- backdrop: puramente visual -->
+<div class="backdrop" *ngIf="open"></div>
 <aside
   class="panel"
+  clickOutside
+  (clickOutside)="onClickOutside()"
   tabindex="-1"
   (click)="$event.stopPropagation()"
   (keydown.escape)="close()">
 
-  <!-- HEADER con slot y botón X -->
   <header class="panel__header">
     <h3 class="panel__title">
       <ng-content select="[panelHeader]"></ng-content>
@@ -19,7 +15,6 @@
     <button class="close-btn" (click)="close()">✕</button>
   </header>
 
-  <!-- BODY con acordeón + slot libre -->
   <section class="panel__body">
     <ul class="menu" *ngIf="menu.length">
       <ng-container *ngFor="let item of menu">
@@ -30,7 +25,9 @@
                class="chevron"
                [class.open]="item.open">›</i>
           </button>
-          <ul class="submenu" [class.open]="item.open" *ngIf="item.children">
+          <ul class="submenu"
+              [class.open]="item.open"
+              *ngIf="item.children">
             <li *ngFor="let c of item.children" class="submenu__item">
               {{ c.label }}
             </li>
@@ -41,7 +38,6 @@
     <ng-content></ng-content>
   </section>
 
-  <!-- FOOTER slot -->
   <footer class="panel__footer">
     <ng-content select="[panelFooter]"></ng-content>
   </footer>

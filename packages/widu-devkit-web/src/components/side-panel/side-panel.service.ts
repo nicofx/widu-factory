@@ -34,13 +34,17 @@ export class SidePanelService {
         );
       } else {
         // En mobile o cerrado, quitar cualquier offset
+        
         document.documentElement.style.setProperty('--sidebar-offset', '0');
       }
     });
   }
 
   /** Alterna abierto/cerrado */
-  toggle() { this._open.update(v => !v); }
+  toggle() { 
+      console.log('abriendo panel...');
+      this._open.update(v => !v);
+   }
   open()   { this._open.set(true); }
   close()  { this._open.set(false); }
 

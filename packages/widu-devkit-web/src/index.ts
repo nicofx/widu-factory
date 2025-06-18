@@ -29,5 +29,11 @@ export * from './services/context/app-context.service';
 export * from './services/context/wid-context.mixin';
 
 
+// Helpers
+export * from './helpers/click-outside.directive';
+export * from './helpers/focus-trap.service';
+export * from './services/app-injector';
+
+
 
 

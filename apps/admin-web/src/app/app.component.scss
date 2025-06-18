@@ -1,4 +1,50 @@
+/* app.component.scss */
+
+/* alturas fijas */
 :root {
-  --header-height: 3.5rem;
-  --footer-height: 3.5rem;
+  --header-height: 64px;
+  --footer-height: 64px;
+}
+
+/* 1️⃣ Grid container: header/body/footer */
+.layout {
+  display: grid;
+  grid-template-rows: var(--header-height) 1fr var(--footer-height);
+  height: 100vh;
+  margin: 0;
+}
+
+/* 2️⃣ Header (fila 1) */
+.layout__header {
+  background: lightcoral; /* debug color 1 */
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+}
+
+/* 3️⃣ Body (fila 2): flex para panel + contenido */
+.layout__body {
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 4️⃣ Content (lado derecho) */
+.layout__content {
+  flex: 1 1 auto;
+  background: lightgreen; /* debug color 2 */
+  padding: 1rem;
+  margin: 0;
+  transition: margin .3s ease; /* para el push en desktop */
+  overflow: auto;
+}
+
+/* 5️⃣ Footer (fila 3) */
+.layout__footer {
+  background: lightblue; /* debug color 3 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0.5rem;
 }
