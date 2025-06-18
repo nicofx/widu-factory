@@ -1,5 +1,5 @@
 import { Component, } from '@angular/core';
-import { SidePanelComponent, SidePanelService,  } from '@widu/devkit-web';
+import { MenuItem, SidePanelComponent, SidePanelService,  } from '@widu/devkit-web';
 @Component({
   standalone: true,
   selector: 'app-root',
@@ -8,5 +8,16 @@ import { SidePanelComponent, SidePanelService,  } from '@widu/devkit-web';
 })
 export class AppComponent {
   constructor(public sp: SidePanelService) {}
+
+    sideMenu: MenuItem[] = [
+    { label: 'Dashboard' },
+    {
+      label: 'Usuarios',
+      children: [
+        { label: 'Listado' },
+        { label: 'Alta' }
+      ]
+    }
+  ];
 
 }

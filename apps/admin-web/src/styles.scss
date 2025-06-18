@@ -19,17 +19,9 @@
   height: calc(100vh - 4rem);       /* viewport menos la altura del header (64 px -> 4rem) */
 }
 
-/* Cuando la barra colapsa */
-body.sidebar-collapsed .layout {
-  grid-template-columns: 4rem 1fr;
-}
+/* Transición suave para el layout */
+.app-content { transition: margin-left .3s, margin-right .3s; }
 
-/* Area de contenido dividida mitad-mitad */
-.content {
-  @apply grid gap-4 p-6;
-  grid-template-columns: 1fr 1fr;   /* 50 % / 50 % */
-}
-
-.half      { @apply rounded bg-white shadow p-4; }
-.placeholder { @apply text-gray-700; }
-.widget-zone { /* estilos que quieras para el slot del widget */ }
+/* Empuje automático usando var actualizada por el servicio */
+body.panel-open-left  .app-content { margin-left:  var(--sidebar-offset); }
+body.panel-open-right .app-content { margin-right: var(--sidebar-offset); }

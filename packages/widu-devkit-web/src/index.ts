@@ -9,8 +9,6 @@ export * from './components/dialogs/variants/widu-confirm-dialog.component';
 export * from './components/dialogs/variants/widu-info-dialog.component';
 
 // Sidebar
-export * from './components/sidebar/sidebar.model';
-export * from './components/sidebar/widu-sidebar.component';
 
 // Side Panel
 export * from './components/side-panel/side-panel.component';
