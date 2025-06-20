@@ -1,13 +1,19 @@
 import { Component, } from '@angular/core';
-import { SidePanelComponent, SidePanelService,  } from '@widu/devkit-web';
+import { HeaderComponent, SidePanelComponent, SidePanelService, ToolbarComponent, ToolbarService,  } from '@widu/devkit-web';
 @Component({
   standalone: true,
   selector: 'app-root',
   templateUrl: './app.component.html',
-  imports: [SidePanelComponent, ]
+  imports: [SidePanelComponent, HeaderComponent, ToolbarComponent]
 })
 export class AppComponent {
-  constructor(public sp: SidePanelService) {}
+  constructor(private toolbar: ToolbarService) {}
+
+
+  // Handler del toggle
+  onToolbarToggled(visible: boolean) {
+    console.log('Toolbar visible?', visible);
+  }
 
     sideMenu: any[] = [
     { label: 'Dashboard' },

@@ -23,17 +23,21 @@ export * from './services/viewport/responsive.mixin';
 export * from './services/viewport/viewport.service';
 export * from './services/viewport/viewport.tokens';
 
-
 // Context
 export * from './services/context/app-context.service';
 export * from './services/context/wid-context.mixin';
-
 
 // Helpers
 export * from './helpers/click-outside.directive';
 export * from './helpers/focus-trap.service';
 export * from './services/app-injector';
 
+// Header
+export * from './components/header/header.component';
+export * from './components/header/header.service';
+// Toolbar
+export * from './components/toolbar/toolbar.component';
+export * from './components/toolbar/toolbar.service';
 
 
 

@@ -1,5 +1,6 @@
-<!-- backdrop: puramente visual -->
+<!-- backdrop -->
 <div class="backdrop" *ngIf="open"></div>
+
 <aside
   class="panel"
   clickOutside
@@ -12,7 +13,20 @@
     <h3 class="panel__title">
       <ng-content select="[panelHeader]"></ng-content>
     </h3>
-    <button class="close-btn" (click)="close()">✕</button>
+
+    <div class="panel__controls">
+      <!-- pin sólo en desktop -->
+      <button
+        *ngIf="!vp.isMobile()"
+        class="pin-btn"
+        (click)="toggleLock()"
+        [attr.aria-pressed]="locked">
+        {{ locked ? '📌' : '📍' }}
+      </button>
+
+      <!-- cerrar -->
+      <button class="close-btn" (click)="close()">✕</button>
+    </div>
   </header>
 
   <section class="panel__body">
@@ -25,9 +39,7 @@
                class="chevron"
                [class.open]="item.open">›</i>
           </button>
-          <ul class="submenu"
-              [class.open]="item.open"
-              *ngIf="item.children">
+          <ul class="submenu" [class.open]="item.open" *ngIf="item.children">
             <li *ngFor="let c of item.children" class="submenu__item">
               {{ c.label }}
             </li>
@@ -35,6 +47,7 @@
         </li>
       </ng-container>
     </ul>
+
     <ng-content></ng-content>
   </section>
 

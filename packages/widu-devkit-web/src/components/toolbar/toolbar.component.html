@@ -1,0 +1,17 @@
+<!-- Sólo render si visible() true -->
+<ng-container *ngIf="ts.visible()">
+  <div class="widu-toolbar">
+    <div class="zone left"
+         *ngIf="zoneVisible('left')">
+      <ng-content select="[toolbarLeft]"></ng-content>
+    </div>
+    <div class="zone center"
+         *ngIf="zoneVisible('center')">
+      <ng-content select="[toolbarCenter]"></ng-content>
+    </div>
+    <div class="zone right"
+         *ngIf="zoneVisible('right')">
+      <ng-content select="[toolbarRight]"></ng-content>
+    </div>
+  </div>
+</ng-container>

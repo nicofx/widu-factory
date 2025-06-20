@@ -1,45 +1,29 @@
-/* packages/widu-devkit-web/src/components/header/header.component.scss */
-
 :host {
   display: block;
   width: 100%;
+  /* valor por defecto */
+  --vertical-align: center;
 }
 
-/* Sticky */
-:host(.sticky) {
-  position: sticky;
-  top: 0;
-  z-index: 1000;
-}
-
-/* Locked */
-:host(.locked) {
-  /* estilo opcional para locked */
-}
-
-/* Elevations */
+:host(.hidden)   { display: none; }
+:host(.sticky)   { position: sticky; top: 0; z-index: 100; }
+:host(.locked)   { opacity: 0.8; }
 :host(.elevation-none) { box-shadow: none; }
 :host(.elevation-sm)   { box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
 :host(.elevation-md)   { box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
 :host(.elevation-lg)   { box-shadow: 0 10px 20px rgba(0,0,0,0.15); }
 
-.row.main {
+.widu-toolbar {
   display: flex;
   justify-content: space-between;
-  align-items: center;
-}
-
-.row.subtitle {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.875rem;
-  line-height: 1.2;
+  align-items: var(--vertical-align);
 }
 
 .zone {
   flex: 1;
+  padding: 0.5rem 1rem;
 }
 
+.zone.left   { text-align: left; }
 .zone.center { text-align: center; }
 .zone.right  { text-align: right; }

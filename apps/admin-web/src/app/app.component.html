@@ -1,18 +1,41 @@
-<!-- apps/admin-web/src/app/app.component.html -->
-<div class="layout">
+<!-- src/app/app.component.html -->
+
+<!-- 1) Toolbar full-width y sticky -->
+<widu-toolbar
+  [sticky]="true"
+  [hideOnMobile]="{ center: true }"
+  verticalAlign="top">
+  <button toolbarLeft>≡</button>
+  <h2 toolbarCenter>Title</h2>
+  <button toolbarRight>✓</button>
+</widu-toolbar>
+
+<!-- 2) Empujamos el contenido para que no quede detrás del toolbar (h-16 = 4rem) -->
+<div class="pt-16 layout">
   <header class="layout__header">
-      <button (click)="sp.toggle(); $event.stopPropagation()">☰</button>
-    <h1>Título de la Aplicación</h1>
+    <widu-header
+      class="w-full"
+      [zones]="['left','center','right']"
+      [subtitleLines]="2"
+      [zoneWeights]="{ left:1, center:2, right:1 }"
+      [zoneRowWeights]="{ center:[7,3] }"
+      [background]="'#e0e0ff'"
+    >
+      <div headerLeft>🔍 Search</div>
+      <h1 headerCenter>Reporting</h1>
+      <div headerRight>👤 Perfil</div>
+      <div headerCenterSubtitle>70 % arriba | 30 % abajo</div>
+    </widu-header>
   </header>
 
   <div class="layout__body">
-    <!-- Fijate que layout__body ahora es el padre contenedor -->
     <widu-side-panel
       position="left"
       width="18rem"
       offsetTop="0"
       offsetBottom="0"
-      [menu]="sideMenu">
+      [menu]="sideMenu"
+    >
       <span panelHeader>Menú principal</span>
       <div panelFooter>© 2025 WiduIT</div>
     </widu-side-panel>

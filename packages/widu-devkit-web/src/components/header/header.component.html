@@ -1,0 +1,33 @@
+<header class="widu-header">
+  <!-- fila principal: alineada vertical según --vertical-align -->
+  <div class="row main">
+    <div class="zone left"
+         *ngIf="zoneVisible('left')">
+      <ng-content select="[headerLeft]"></ng-content>
+    </div>
+    <div class="zone center"
+         *ngIf="zoneVisible('center')">
+      <ng-content select="[headerCenter]"></ng-content>
+    </div>
+    <div class="zone right"
+         *ngIf="zoneVisible('right')">
+      <ng-content select="[headerRight]"></ng-content>
+    </div>
+  </div>
+
+  <!-- fila subtítulos: misma alineación y visibilidad -->
+  <div class="row subtitle" *ngIf="header.subtitleLines() > 0">
+    <div class="zone left"
+         *ngIf="zoneVisible('left')">
+      <ng-content select="[headerLeftSubtitle]"></ng-content>
+    </div>
+    <div class="zone center"
+         *ngIf="zoneVisible('center')">
+      <ng-content select="[headerCenterSubtitle]"></ng-content>
+    </div>
+    <div class="zone right"
+         *ngIf="zoneVisible('right')">
+      <ng-content select="[headerRightSubtitle]"></ng-content>
+    </div>
+  </div>
+</header>
